@@ -138,6 +138,12 @@ on:
         required: false
         type: boolean
 
+      isponsorblock:
+        description: "Integrate iSponsorBlock (SponsorBlock)"
+        default: true
+        required: false
+        type: boolean
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -153,7 +159,7 @@ jobs:
       - name: Hide Sensitive Inputs
         uses: levibostian/action-hide-sensitive-inputs@v1
         with:
-          exclude_inputs: bundle_id,display_name,youpip,ytuhd,ryd,abconfig,youquality,youspeed,youmute,youloop,ytweaks,youslider,ytholdspeed,youchoose,youshare,gonerino,getcap,demc,ytshare,volboost
+          exclude_inputs: bundle_id,display_name,youpip,ytuhd,ryd,abconfig,youquality,youspeed,youmute,youloop,ytweaks,youslider,ytholdspeed,youchoose,youshare,gonerino,getcap,demc,ytshare,volboost,isponsorblock
           
       - name: Install MEGA downloader
         if: ${{ startsWith(inputs.ipa_url, 'https://mega.nz/') }}
@@ -350,6 +356,28 @@ jobs:
         if: ${{ inputs.volboost }}
         run: git clone --quiet --depth=1 https://github.com/VasirakCalgux/VolumeBoostYT.git
 
+      - name: Clone iSponsorBlock
+        if: ${{ inputs.isponsorblock }}
+        run: git clone --quiet --depth=1 https://github.com/JeffreyCA/iSponsorBlock.git
+
+      # iSponsorBlock links against Alderis's libcolorpicker at build time, and needs Alderis.framework
+      # bundled into the ipa at runtime for its color picker UI. Reuses the same prebuilt alderis.deb
+      # that "Clone YouSlider" already downloads for the same reason.
+      # To add a future tweak that also needs colorpicker, OR its input flag into this condition.
+      - name: Prepare colorpicker library (Alderis)
+        if: ${{ inputs.isponsorblock }}
+        run: |
+          if [ ! -f alderis.deb ]; then
+            wget --no-verbose --quiet https://github.com/Tonwalter888/Tonwalter888.github.io/raw/refs/heads/main/deb/alderis.deb
+          fi
+          mkdir -p alderis_extract
+          cd alderis_extract
+          ar x ../alderis.deb
+          tar -xf data.tar.lzma
+          mkdir -p "$THEOS/lib/iphone/rootless"
+          cp usr/lib/libcolorpicker.dylib "$THEOS/lib/iphone/rootless/"
+          cd ..
+
       - name: Build YouMod
         run: |
           cd YouMod
@@ -498,6 +526,13 @@ jobs:
           make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64
           mv packages/*.deb ${{ github.workspace }}/volboostyt.deb
           
+      - name: Build iSponsorBlock
+        if: ${{ inputs.isponsorblock }}
+        run: |
+          cd iSponsorBlock
+          make clean package DEBUG=0 FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless TARGET=iphone:clang:latest:13.0
+          mv packages/*.deb ${{ github.workspace }}/isponsorblock.deb
+
       - name: Inject Tweaks Into IPA
         run: |
           tweaks="OpenYouTubeSafariExtension.appex"
