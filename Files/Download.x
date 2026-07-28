@@ -42,13 +42,24 @@
 - (NSString *)shortDescription;
 @end
 
-// Raised by YouTube whenever the download intent is triggered, no matter which
-// view or dialog produced it. Hooked below so the download manager keeps working
-// across YouTube's action bar redesigns.
+// The two events a download travels on, hooked below so the download manager
+// keeps working across YouTube's action bar redesigns. YTUpsellResponderEvent is
+// the one used when the account has no Premium subscription.
 @interface YTOfflineButtonPressedResponderEvent : NSObject
 - (UIView *)fromView;
 - (void)send;
 @end
+
+@interface YTUpsellResponderEvent : NSObject
+- (void)send;
+@end
+
+static const void *YouModOfflineUpsellKey = &YouModOfflineUpsellKey;
+
+static id YouModMarkOfflineUpsell(id event) {
+    if (event) objc_setAssociatedObject(event, YouModOfflineUpsellKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return event;
+}
 
 static UIImage *YouModIconImage(NSInteger iconType) {
     YTIIcon *icon = [%c(YTIIcon) new];
@@ -2347,32 +2358,60 @@ void YouModConfigureDownloadButton(_ASDisplayView *view) {
 %end
 
 // YouTube reworked the under-player action bar (seen from 21.22), moving the
-// download entry into a dialog. "id.ui.add_to.offline.button" is no longer
-// reliably present there, so the gesture above never gets attached and YouTube's
-// own Premium upsell runs instead. Catching the responder event covers that case
-// without depending on the identifier of whatever view is currently used.
-%hook YTOfflineButtonPressedResponderEvent
-
-- (void)send {
-    if (!IS_ENABLED(DownloadManager) || IS_ENABLED(HideDownloadButton)) {
-        %orig;
-        return;
-    }
-
-    UIView *sender = YouModObjectFromSelector(self, @selector(fromView));
-    if (![sender isKindOfClass:UIView.class]) sender = nil;
+// download entry into a dialog, so the identifier the gesture above relies on is
+// no longer a dependable way to reach the download manager. These two events are
+// what the download actually travels on, whichever view or dialog raised it.
+//
+// Returns whether the download manager took the event over.
+static BOOL YouModTakeOverDownloadEvent(UIView *sender) {
+    if (!IS_ENABLED(DownloadManager) || IS_ENABLED(HideDownloadButton)) return NO;
 
     UIViewController *presenter = YouModPresenterForSender(sender, YouModCurrentPlayerViewController);
     YTPlayerViewController *player = YouModPlayerFromViewController(presenter);
 
     // Downloading reads the streaming data off a loaded player. Events raised
     // where there is none (a feed cell, for instance) stay with YouTube.
-    if (!player) {
+    if (!player) return NO;
+
+    YouModShowDownloadManager(player, presenter, sender);
+    return YES;
+}
+
+%hook YTOfflineButtonPressedResponderEvent
+
+- (void)send {
+    UIView *sender = YouModObjectFromSelector(self, @selector(fromView));
+    if (![sender isKindOfClass:UIView.class]) sender = nil;
+    if (!YouModTakeOverDownloadEvent(sender)) %orig;
+}
+
+%end
+
+// Without a Premium subscription the download never reaches the event above:
+// YouTube builds a YTUpsellResponderEvent through one of its offline factories
+// and sends that instead, which is what raises the Premium screen. The class is
+// shared with unrelated upsells (background play, higher qualities, ...), so only
+// the events coming out of those offline factories are marked and taken over.
+%hook YTUpsellResponderEvent
+
++ (instancetype)eventWithOfflineUpsell:(id)upsell videoID:(NSString *)videoID firstResponder:(id)firstResponder {
+    return YouModMarkOfflineUpsell(%orig);
+}
+
++ (instancetype)eventWithOfflineUpsell:(id)upsell videoID:(NSString *)videoID playlistID:(NSString *)playlistID firstResponder:(id)firstResponder {
+    return YouModMarkOfflineUpsell(%orig);
+}
+
++ (instancetype)eventWithOfflineUpsell:(id)upsell videoID:(NSString *)videoID playlistID:(NSString *)playlistID cancelBlock:(id)cancelBlock firstResponder:(id)firstResponder {
+    return YouModMarkOfflineUpsell(%orig);
+}
+
+- (void)send {
+    if (!objc_getAssociatedObject(self, YouModOfflineUpsellKey)) {
         %orig;
         return;
     }
-
-    YouModShowDownloadManager(player, presenter, sender);
+    if (!YouModTakeOverDownloadEvent(nil)) %orig;
 }
 
 %end
