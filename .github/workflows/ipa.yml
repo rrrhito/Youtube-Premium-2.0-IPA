@@ -168,8 +168,18 @@ jobs:
         if: ${{ !startsWith(inputs.ipa_url, 'https://mega.nz/') }}
         env:
           IPA_URL: ${{ inputs.ipa_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          wget "$IPA_URL" --quiet --no-verbose -O youtube.ipa
+          # Release assets of this (private) repository are served by the API and
+          # need the workflow token, so the IPA never has to sit on a public host.
+          if [[ "$IPA_URL" == https://api.github.com/* ]]; then
+            curl -sSL --fail \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/octet-stream" \
+              -o youtube.ipa "$IPA_URL"
+          else
+            wget "$IPA_URL" --quiet --no-verbose -O youtube.ipa
+          fi
 
       - name: Validate IPA
         run: |
