@@ -31,7 +31,7 @@
 "AUTO_CLEARCACHE" = "キャッシュを自動削除";
 "AUTO_CLEARCACHE_DESC" = "起動時にアプリのキャッシュを自動的に削除します。";
 
-"DOWNLOADING" = "ダウンロード中";
+"DOWNLOADING" = "ダウンロード中 (dlfix4)";
 "DOWNLOAD_MANAGER" = "ダウンロードマネージャー";
 "DOWNLOAD_MANAGER_DESC" = "YouTube標準のダウンローダーをYouMod版に置き換えます。動画・音声・字幕・サムネイルのダウンロードに対応。";
 "DOWNLOAD_SAVE_PHOTOS" = "写真アプリへ自動保存";

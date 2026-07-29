@@ -14,6 +14,8 @@
 #import <YouTubeHeader/YTPlayerResponse.h>
 #import <YouTubeHeader/YTIVideoDetails.h>
 
+extern void MSHookMessageEx(Class class, SEL selector, IMP replacement, IMP *result);
+
 @interface YTDefaultSheetController (YouModDownload)
 + (instancetype)sheetControllerWithParentResponder:(id)parentResponder;
 - (void)addAction:(YTActionSheetAction *)action;
@@ -714,9 +716,8 @@ static void YouModRecordDownloadDiagnostic(NSString *context, NSString *details)
 }
 
 static NSString *YouModDownloadDiagnosticText(void) {
-    if (YouModLastDownloadDiagnostic.length) return YouModLastDownloadDiagnostic;
     NSString *log = [NSString stringWithContentsOfURL:YouModDiagnosticLogURL() encoding:NSUTF8StringEncoding error:nil];
-    if (log.length == 0) return nil;
+    if (log.length == 0) return YouModLastDownloadDiagnostic;
     NSUInteger maxLength = 12000;
     return log.length > maxLength ? [log substringFromIndex:log.length - maxLength] : log;
 }
@@ -2345,6 +2346,22 @@ void YouModConfigureDownloadButton(_ASDisplayView *view) {
     objc_setAssociatedObject(view, @selector(YouModDownloadButtonTapped:), @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+%hook UIView
+
+- (void)setAccessibilityIdentifier:(NSString *)accessibilityIdentifier {
+    %orig;
+    if (accessibilityIdentifier.length) {
+        YouModRecordDownloadDiagnostic(
+            @"UIView accessibility identifier",
+            [NSString stringWithFormat:@"class=%@\nidentifier=%@",
+             NSStringFromClass(self.class), accessibilityIdentifier]
+        );
+    }
+    YouModConfigureDownloadButton((_ASDisplayView *)self);
+}
+
+%end
+
 %hook _ASDisplayView
 
 %new
@@ -2356,6 +2373,68 @@ void YouModConfigureDownloadButton(_ASDisplayView *view) {
 }
 
 %end
+
+// Discover the actual responder-event path used by the current YouTube build
+// without assuming a fixed list of event classes. Only classes that implement
+// -send themselves are hooked; inherited implementations are logged by their
+// hooked ResponderEvent superclass while retaining the concrete runtime class
+// name in the diagnostic entry.
+static NSDictionary<NSString *, NSValue *> *YouModResponderEventSendImplementations;
+
+static IMP YouModOriginalResponderEventSendImplementation(id object) {
+    for (Class cls = object_getClass(object); cls; cls = class_getSuperclass(cls)) {
+        NSValue *value = YouModResponderEventSendImplementations[NSStringFromClass(cls)];
+        if (value) return (IMP)value.pointerValue;
+    }
+    return NULL;
+}
+
+static void YouModDiagnosticResponderEventSend(id self, SEL _cmd) {
+    YouModRecordDownloadDiagnostic(
+        @"ResponderEvent -send",
+        [NSString stringWithFormat:@"class=%@", NSStringFromClass(object_getClass(self))]
+    );
+
+    IMP original = YouModOriginalResponderEventSendImplementation(self);
+    if (original) ((void (*)(id, SEL))original)(self, _cmd);
+}
+
+static void YouModInstallResponderEventDiagnostics(void) {
+    int classCount = objc_getClassList(NULL, 0);
+    if (classCount <= 0) return;
+
+    int classCapacity = classCount;
+    Class *classes = (__unsafe_unretained Class *)calloc((size_t)classCapacity, sizeof(Class));
+    if (!classes) return;
+    classCount = MIN(objc_getClassList(classes, classCapacity), classCapacity);
+
+    NSMutableDictionary<NSString *, NSValue *> *implementations = [NSMutableDictionary dictionary];
+    YouModResponderEventSendImplementations = implementations;
+    SEL sendSelector = @selector(send);
+    for (int index = 0; index < classCount; index++) {
+        Class cls = classes[index];
+        NSString *className = NSStringFromClass(cls);
+        if (![className hasSuffix:@"ResponderEvent"]) continue;
+
+        unsigned int methodCount = 0;
+        Method *methods = class_copyMethodList(cls, &methodCount);
+        BOOL implementsSend = NO;
+        for (unsigned int methodIndex = 0; methodIndex < methodCount; methodIndex++) {
+            if (method_getName(methods[methodIndex]) == sendSelector) {
+                implementsSend = YES;
+                break;
+            }
+        }
+        free(methods);
+        if (!implementsSend) continue;
+
+        IMP original = NULL;
+        MSHookMessageEx(cls, sendSelector, (IMP)YouModDiagnosticResponderEventSend, &original);
+        if (original) implementations[className] = [NSValue valueWithPointer:original];
+    }
+    free(classes);
+    YouModResponderEventSendImplementations = implementations.copy;
+}
 
 // YouTube reworked the under-player action bar (seen from 21.22), moving the
 // download entry into a dialog, so the identifier the gesture above relies on is
@@ -2462,3 +2541,10 @@ NSString *YouModGlobalAuthHeader = nil;
     return token;
 }
 %end
+
+%ctor {
+    %init;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        YouModInstallResponderEventDiagnostics();
+    });
+}
