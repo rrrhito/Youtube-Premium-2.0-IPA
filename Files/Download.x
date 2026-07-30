@@ -1558,8 +1558,26 @@ static void YouModResolveCipherStreamsWithPlayerJS(YTPlayerViewController *playe
         NSDictionary *transforms = YouModExtractPlayerTransforms(javascript);
         NSUInteger attempted = 0;
         NSUInteger resolved = 0;
+        NSUInteger directCipherCount = 0;
+        NSUInteger nestedCipherCount = 0;
+        NSUInteger directHasCipherFlagCount = 0;
+        NSUInteger nestedHasCipherFlagCount = 0;
+        NSMutableDictionary<NSString *, NSNumber *> *streamClassCounts = [NSMutableDictionary dictionary];
         for (id stream in YouModAdaptiveFormatObjectsForPlayer(player)) {
+            NSString *streamClass = NSStringFromClass([stream class]) ?: @"(nil)";
+            streamClassCounts[streamClass] = @([streamClassCounts[streamClass] unsignedIntegerValue] + 1);
+            if (YouModBoolFromSelector(stream, @selector(hasSignatureCipher)))
+                directHasCipherFlagCount++;
             NSString *cipher = YouModStringFromSelector(stream, @selector(signatureCipher));
+            if (cipher.length) {
+                directCipherCount++;
+            } else {
+                id formatStream = YouModObjectFromSelector(stream, @selector(formatStream));
+                if (YouModBoolFromSelector(formatStream, @selector(hasSignatureCipher)))
+                    nestedHasCipherFlagCount++;
+                cipher = YouModStringFromSelector(formatStream, @selector(signatureCipher));
+                if (cipher.length) nestedCipherCount++;
+            }
             if (cipher.length == 0) continue;
             attempted++;
             NSString *resolvedURL = YouModResolvedURLFromCipher(cipher, transforms);
@@ -1570,7 +1588,14 @@ static void YouModResolveCipherStreamsWithPlayerJS(YTPlayerViewController *playe
         }
         YouModDiagnosticCipherAttempted = attempted;
         YouModDiagnosticCipherResolved = resolved;
-        YouModRecordDownloadDiagnostic(@"signatureCipher resolution summary", [NSString stringWithFormat:@"attempted=%lu\nresolved=%lu", (unsigned long)attempted, (unsigned long)resolved]);
+        YouModRecordDownloadDiagnostic(
+            @"signatureCipher resolution summary",
+            [NSString stringWithFormat:@"streamClasses=%@\ndirectHasFlag=%lu\nnestedHasFlag=%lu\ndirect=%lu\nnested=%lu\nattempted=%lu\nresolved=%lu",
+             streamClassCounts,
+             (unsigned long)directHasCipherFlagCount, (unsigned long)nestedHasCipherFlagCount,
+             (unsigned long)directCipherCount, (unsigned long)nestedCipherCount,
+             (unsigned long)attempted, (unsigned long)resolved]
+        );
         YouModFinishCipherResolution();
     }] resume];
 }
