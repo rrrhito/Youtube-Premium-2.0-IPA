@@ -31,13 +31,15 @@
 "AUTO_CLEARCACHE" = "キャッシュを自動削除";
 "AUTO_CLEARCACHE_DESC" = "起動時にアプリのキャッシュを自動的に削除します。";
 
-"DOWNLOADING" = "ダウンロード中 (dlfix7)";
+"DOWNLOADING" = "ダウンロード中 (dlfix8)";
 "DOWNLOAD_MANAGER" = "ダウンロードマネージャー";
 "DOWNLOAD_MANAGER_DESC" = "YouTube標準のダウンローダーをYouMod版に置き換えます。動画・音声・字幕・サムネイルのダウンロードに対応。";
 "DOWNLOAD_SAVE_PHOTOS" = "写真アプリへ自動保存";
 "DOWNLOAD_SAVE_PHOTOS_DESC" = "ダウンロードした動画・画像を写真アプリへ自動的に保存します。";
 "DOWNLOAD_DRC_AUDIO" = "DRC音声を優先";
 "DOWNLOAD_DRC_AUDIO_DESC" = "音量差を抑えるダイナミックレンジ圧縮(DRC)付きの音声トラックを優先してダウンロードします。";
+"COPY_DOWNLOAD_DIAGNOSTICS" = "診断ログをコピー";
+"COPY_DOWNLOAD_DIAGNOSTICS_DESC" = "ダウンロード関連の診断ログをクリップボードへコピーします。";
 
 "APPEARANCE" = "外観";
 "OLED_THEME" = "OLEDダークモード";

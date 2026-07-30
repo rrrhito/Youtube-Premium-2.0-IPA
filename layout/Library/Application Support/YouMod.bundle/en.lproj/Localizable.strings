@@ -38,6 +38,8 @@
 "DOWNLOAD_SAVE_PHOTOS_DESC" = "Automatically saves downloaded videos and images directly to your Photos app.";
 "DOWNLOAD_DRC_AUDIO" = "Prefer DRC Audio";
 "DOWNLOAD_DRC_AUDIO_DESC" = "Prioritizes downloading audio tracks with Dynamic Range Compression for more consistent volume levels.";
+"COPY_DOWNLOAD_DIAGNOSTICS" = "Copy diagnostics";
+"COPY_DOWNLOAD_DIAGNOSTICS_DESC" = "Copies download-related diagnostic logs to the clipboard.";
 
 "APPEARANCE" = "Appearance";
 "OLED_THEME" = "OLED dark mode";
