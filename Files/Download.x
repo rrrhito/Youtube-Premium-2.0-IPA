@@ -2335,7 +2335,16 @@ static void YouModShowCaptionsSheet(YTPlayerViewController *player, UIViewContro
 }
 
 static void YouModShowDownloadManager(YTPlayerViewController *player, UIViewController *presenter, UIView *sender) {
+    YouModRecordDownloadDiagnostic(
+        @"YouModShowDownloadManager called",
+        [NSString stringWithFormat:@"player=%@\npresenter=%@\nsender=%@",
+         player, presenter, sender]
+    );
     if (!player) {
+        YouModRecordDownloadDiagnostic(
+            @"YouModShowDownloadManager returned early",
+            @"player is nil"
+        );
         YouModSendToast(@"Open a video before using the download manager.", presenter);
         return;
     }
@@ -2418,7 +2427,18 @@ static BOOL YouModIdentifierLooksDownloadRelated(NSString *identifier) {
 
 %new
 - (void)YouModDownloadButtonTapped:(UITapGestureRecognizer *)sender {
-    if (sender.state != UIGestureRecognizerStateEnded) return;
+    YouModRecordDownloadDiagnostic(
+        @"YouModDownloadButtonTapped called",
+        [NSString stringWithFormat:@"sender=%@\ngestureState=%ld",
+         sender, (long)sender.state]
+    );
+    if (sender.state != UIGestureRecognizerStateEnded) {
+        YouModRecordDownloadDiagnostic(
+            @"YouModDownloadButtonTapped returned early",
+            [NSString stringWithFormat:@"gesture state is not ended (%ld)", (long)sender.state]
+        );
+        return;
+    }
     UIViewController *presenter = YouModPresenterForSender(self, YouModCurrentPlayerViewController);
     YTPlayerViewController *player = YouModPlayerFromViewController(presenter);
     YouModShowDownloadManager(player, presenter, self);
@@ -2446,6 +2466,27 @@ static void YouModDiagnosticResponderEventSend(id self, SEL _cmd) {
 
     IMP original = YouModOriginalResponderEventSendImplementation(self);
     if (original) ((void (*)(id, SEL))original)(self, _cmd);
+}
+
+static void YouModDiagnosticAccountScopedCommandResponderEventSend(id self, SEL _cmd) {
+    SEL displayTitleSelector = @selector(displayTitle);
+    SEL commandSelector = @selector(command);
+    NSString *displayTitle = @"(displayTitle unavailable)";
+    NSString *commandClass = @"(command unavailable)";
+    if ([self respondsToSelector:displayTitleSelector]) {
+        id value = ((id (*)(id, SEL))objc_msgSend)(self, displayTitleSelector);
+        displayTitle = [value isKindOfClass:NSString.class] ? value : [value description];
+    }
+    if ([self respondsToSelector:commandSelector]) {
+        id command = ((id (*)(id, SEL))objc_msgSend)(self, commandSelector);
+        commandClass = command ? NSStringFromClass([command class]) : nil;
+    }
+    YouModRecordDownloadDiagnostic(
+        @"YTAccountScopedCommandResponderEvent details",
+        [NSString stringWithFormat:@"displayTitle=%@\ncommandClass=%@",
+         displayTitle, commandClass]
+    );
+    YouModDiagnosticResponderEventSend(self, _cmd);
 }
 
 static void YouModInstallResponderEventDiagnostics(void) {
@@ -2495,8 +2536,11 @@ static void YouModInstallResponderEventDiagnostics(void) {
         free(methods);
         if (!implementsSend) continue;
 
+        IMP replacement = [className isEqualToString:@"YTAccountScopedCommandResponderEvent"]
+            ? (IMP)YouModDiagnosticAccountScopedCommandResponderEventSend
+            : (IMP)YouModDiagnosticResponderEventSend;
         IMP original = NULL;
-        MSHookMessageEx(cls, sendSelector, (IMP)YouModDiagnosticResponderEventSend, &original);
+        MSHookMessageEx(cls, sendSelector, replacement, &original);
         if (original) implementations[className] = [NSValue valueWithPointer:original];
     }
     YouModResponderEventSendImplementations = implementations.copy;
@@ -2509,14 +2553,37 @@ static void YouModInstallResponderEventDiagnostics(void) {
 //
 // Returns whether the download manager took the event over.
 static BOOL YouModTakeOverDownloadEvent(UIView *sender) {
-    if (!IS_ENABLED(DownloadManager) || IS_ENABLED(HideDownloadButton)) return NO;
+    YouModRecordDownloadDiagnostic(
+        @"YouModTakeOverDownloadEvent called",
+        [NSString stringWithFormat:@"sender=%@", sender]
+    );
+    if (!IS_ENABLED(DownloadManager)) {
+        YouModRecordDownloadDiagnostic(
+            @"YouModTakeOverDownloadEvent returned early",
+            @"DownloadManager is disabled"
+        );
+        return NO;
+    }
+    if (IS_ENABLED(HideDownloadButton)) {
+        YouModRecordDownloadDiagnostic(
+            @"YouModTakeOverDownloadEvent returned early",
+            @"HideDownloadButton is enabled"
+        );
+        return NO;
+    }
 
     UIViewController *presenter = YouModPresenterForSender(sender, YouModCurrentPlayerViewController);
     YTPlayerViewController *player = YouModPlayerFromViewController(presenter);
 
     // Downloading reads the streaming data off a loaded player. Events raised
     // where there is none (a feed cell, for instance) stay with YouTube.
-    if (!player) return NO;
+    if (!player) {
+        YouModRecordDownloadDiagnostic(
+            @"YouModTakeOverDownloadEvent returned early",
+            @"player is nil"
+        );
+        return NO;
+    }
 
     YouModShowDownloadManager(player, presenter, sender);
     return YES;
