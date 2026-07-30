@@ -753,7 +753,7 @@ static NSString *YouModDownloadDiagnosticText(void) {
     return log.length > maxLength ? [log substringFromIndex:log.length - maxLength] : log;
 }
 
-static void YouModCopyDownloadDiagnostics(UIViewController *presenter) {
+void YouModCopyDownloadDiagnostics(UIViewController *presenter) {
     NSString *diagnostic = YouModDownloadDiagnosticText();
     if (diagnostic.length == 0) {
         YouModSendToast(@"No download diagnostics yet.", presenter);

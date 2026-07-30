@@ -49,6 +49,8 @@
 #import <YouTubeHeader/YTToastResponderEvent.h>
 #import <YouTubeHeader/YTUIUtils.h>
 
+void YouModCopyDownloadDiagnostics(UIViewController *presenter);
+
 #define IS_ENABLED(k) [[NSUserDefaults standardUserDefaults] boolForKey:k]
 #define INTFORVAL(v) [[NSUserDefaults standardUserDefaults] integerForKey:v]
 // Downloading
