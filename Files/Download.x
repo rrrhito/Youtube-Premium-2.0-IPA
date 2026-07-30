@@ -727,10 +727,91 @@ static void YouModRecordDownloadDiagnostic(NSString *context, NSString *details)
     });
 }
 
+static NSString *YouModRuntimeSurfaceForObject(id object) {
+    if (!object) return @"object=(nil)";
+
+    NSMutableOrderedSet<NSString *> *propertyNames = [NSMutableOrderedSet orderedSet];
+    NSMutableOrderedSet<NSString *> *methodNames = [NSMutableOrderedSet orderedSet];
+    NSMutableOrderedSet<NSString *> *flaggedNames = [NSMutableOrderedSet orderedSet];
+    NSArray<NSString *> *interestingFragments = @[
+        @"url", @"uri", @"cipher", @"signature", @"stream", @"format",
+        @"media", @"playback", @"request", @"response", @"manifest"
+    ];
+    NSArray<NSString *> *cipherFragments = @[@"signaturecipher", @"cipher", @"signature", @"sig", @"throttle"];
+
+    for (Class cls = object_getClass(object); cls && cls != NSObject.class; cls = class_getSuperclass(cls)) {
+        unsigned int propertyCount = 0;
+        objc_property_t *properties = class_copyPropertyList(cls, &propertyCount);
+        for (unsigned int index = 0; index < propertyCount; index++) {
+            const char *name = property_getName(properties[index]);
+            if (!name) continue;
+            NSString *propertyName = @(name);
+            NSString *lowerName = propertyName.lowercaseString;
+            BOOL interesting = NO;
+            for (NSString *fragment in interestingFragments) {
+                if ([lowerName containsString:fragment]) {
+                    interesting = YES;
+                    break;
+                }
+            }
+            if (interesting) [propertyNames addObject:propertyName];
+            for (NSString *fragment in cipherFragments) {
+                if ([lowerName containsString:fragment]) {
+                    [flaggedNames addObject:propertyName];
+                    break;
+                }
+            }
+        }
+        free(properties);
+
+        unsigned int methodCount = 0;
+        Method *methods = class_copyMethodList(cls, &methodCount);
+        for (unsigned int index = 0; index < methodCount; index++) {
+            NSString *methodName = NSStringFromSelector(method_getName(methods[index]));
+            NSString *lowerName = methodName.lowercaseString;
+            BOOL interesting = NO;
+            for (NSString *fragment in interestingFragments) {
+                if ([lowerName containsString:fragment]) {
+                    interesting = YES;
+                    break;
+                }
+            }
+            if (interesting) [methodNames addObject:methodName];
+            for (NSString *fragment in cipherFragments) {
+                if ([lowerName containsString:fragment]) {
+                    [flaggedNames addObject:methodName];
+                    break;
+                }
+            }
+        }
+        free(methods);
+    }
+
+    NSArray<NSString *> *candidateSelectors = @[
+        @"URL", @"url", @"urlString", @"streamURL", @"playbackURL", @"mediaURL",
+        @"signatureCipher", @"cipher", @"signature", @"sig", @"s", @"sp", @"n",
+        @"formatStream", @"streamingData", @"adaptiveStreams", @"adaptiveFormatsArray",
+        @"selectableVideoFormats", @"playerData", @"activeVideo", @"contentPlayerResponse"
+    ];
+    NSMutableArray<NSString *> *respondingCandidates = [NSMutableArray array];
+    for (NSString *selectorName in candidateSelectors) {
+        if ([object respondsToSelector:NSSelectorFromString(selectorName)])
+            [respondingCandidates addObject:selectorName];
+    }
+
+    return [NSString stringWithFormat:
+        @"class=%@\nrespondingCandidates=%@\nflaggedCipherSelectors=%@\ninterestingProperties=%@\ninterestingMethods=%@",
+        NSStringFromClass(object_getClass(object)),
+        respondingCandidates.count ? [respondingCandidates componentsJoinedByString:@", "] : @"(none)",
+        flaggedNames.count ? [[flaggedNames array] componentsJoinedByString:@", "] : @"(none)",
+        propertyNames.count ? [[propertyNames array] componentsJoinedByString:@", "] : @"(none)",
+        methodNames.count ? [[methodNames array] componentsJoinedByString:@", "] : @"(none)"];
+}
+
 static NSString *YouModDownloadDiagnosticText(void) {
     NSString *log = [NSString stringWithContentsOfURL:YouModDiagnosticLogURL() encoding:NSUTF8StringEncoding error:nil];
     if (log.length == 0) return YouModLastDownloadDiagnostic;
-    NSUInteger maxLength = 12000;
+    NSUInteger maxLength = 60000;
     return log.length > maxLength ? [log substringFromIndex:log.length - maxLength] : log;
 }
 
@@ -1270,15 +1351,41 @@ static NSArray *YouModAdaptiveFormatObjectsForPlayer(YTPlayerViewController *pla
 
     id activeVideo = YouModObjectFromSelector(player, @selector(activeVideo));
     id streamingData = YouModObjectFromSelector(activeVideo, @selector(streamingData));
-    appendFormats(YouModObjectFromSelector(streamingData, @selector(adaptiveStreams)));
-    appendFormats(YouModObjectFromSelector(activeVideo, @selector(selectableVideoFormats)));
+    NSArray *activeAdaptiveStreams = YouModObjectFromSelector(streamingData, @selector(adaptiveStreams));
+    NSArray *selectableVideoFormats = YouModObjectFromSelector(activeVideo, @selector(selectableVideoFormats));
+    appendFormats(activeAdaptiveStreams);
+    appendFormats(selectableVideoFormats);
+
+    NSMutableArray<NSString *> *responseDetails = [NSMutableArray array];
 
     for (id response in YouModPlayerResponsesForPlayer(player)) {
         id playerData = YouModObjectFromSelector(response, @selector(playerData)) ?: response;
         id responseStreamingData = YouModObjectFromSelector(playerData, @selector(streamingData));
-        appendFormats(YouModObjectFromSelector(responseStreamingData, @selector(adaptiveFormatsArray)));
+        NSArray *adaptiveFormats = YouModObjectFromSelector(responseStreamingData, @selector(adaptiveFormatsArray));
+        appendFormats(adaptiveFormats);
+        [responseDetails addObject:[NSString stringWithFormat:
+            @"response=%@ playerData=%@ streamingData=%@ adaptiveFormats=%lu",
+            NSStringFromClass([response class]),
+            NSStringFromClass([playerData class]),
+            NSStringFromClass([responseStreamingData class]),
+            (unsigned long)([adaptiveFormats isKindOfClass:NSArray.class] ? adaptiveFormats.count : 0)]];
     }
 
+    YouModRecordDownloadDiagnostic(
+        @"Available media format sources",
+        [NSString stringWithFormat:
+            @"player=%@\nactiveVideo=%@\nstreamingData=%@\nadaptiveStreams=%lu\nselectableVideoFormats=%lu\nresponses=%@\nuniqueCandidateStreams=%lu\n\nplayer runtime surface:\n%@\n\nactiveVideo runtime surface:\n%@\n\nstreamingData runtime surface:\n%@",
+            NSStringFromClass([player class]),
+            NSStringFromClass([activeVideo class]),
+            NSStringFromClass([streamingData class]),
+            (unsigned long)([activeAdaptiveStreams isKindOfClass:NSArray.class] ? activeAdaptiveStreams.count : 0),
+            (unsigned long)([selectableVideoFormats isKindOfClass:NSArray.class] ? selectableVideoFormats.count : 0),
+            responseDetails.count ? [responseDetails componentsJoinedByString:@"\n"] : @"(none)",
+            (unsigned long)formats.count,
+            YouModRuntimeSurfaceForObject(player),
+            YouModRuntimeSurfaceForObject(activeVideo),
+            YouModRuntimeSurfaceForObject(streamingData)]
+    );
     return formats.copy;
 }
 
@@ -1288,7 +1395,15 @@ static YouModMediaFormat *YouModMediaFormatFromStream(id stream, BOOL video) {
     if (url.length == 0) url = YouModStringFromSelector(formatStream, @selector(URL));
     if (url.length == 0) url = YouModStringFromSelector(stream, @selector(url));
     if (url.length == 0) url = YouModStringFromSelector(formatStream, @selector(url));
-    if (url.length == 0) return nil;
+    if (url.length == 0) {
+        YouModRecordDownloadDiagnostic(
+            @"Media format rejected: no URL",
+            [NSString stringWithFormat:@"stream runtime surface:\n%@\n\nformatStream runtime surface:\n%@",
+             YouModRuntimeSurfaceForObject(stream),
+             YouModRuntimeSurfaceForObject(formatStream)]
+        );
+        return nil;
+    }
 
     NSString *mimeType = YouModStringFromSelector(stream, @selector(mimeType));
     if (mimeType.length == 0) mimeType = YouModStringFromSelector(formatStream, @selector(mimeType));
@@ -1432,7 +1547,8 @@ static NSString *YouModQualityLabel(NSInteger height, NSInteger fps, NSString *f
 
 static NSArray <YouModMediaFormat *> *YouModFormatsForPlayer(YTPlayerViewController *player, BOOL video) {
     NSMutableArray *formats = [NSMutableArray array];
-    for (id stream in YouModAdaptiveFormatObjectsForPlayer(player)) {
+    NSArray *candidateStreams = YouModAdaptiveFormatObjectsForPlayer(player);
+    for (id stream in candidateStreams) {
         YouModMediaFormat *format = YouModMediaFormatFromStream(stream, video);
         if (format) [formats addObject:format];
     }
@@ -1469,6 +1585,14 @@ static NSArray <YouModMediaFormat *> *YouModFormatsForPlayer(YTPlayerViewControl
         [seen addObject:key];
         [unique addObject:format];
     }
+    YouModRecordDownloadDiagnostic(
+        @"Available media formats result",
+        [NSString stringWithFormat:@"kind=%@\ncandidateStreams=%lu\nacceptedBeforeDedup=%lu\nreturned=%lu",
+         video ? @"video" : @"audio",
+         (unsigned long)candidateStreams.count,
+         (unsigned long)formats.count,
+         (unsigned long)unique.count]
+    );
     return unique.copy;
 }
 
@@ -2612,14 +2736,41 @@ static void YouModLayoutOwnedDownloadButton(YTPlayerViewController *player) {
     CGFloat y = MAX(safeArea.top + 12.0, 12.0);
     button.frame = CGRectMake(x, y, width, height);
     [container bringSubviewToFront:button];
-    button.hidden = !IS_ENABLED(DownloadManager) || IS_ENABLED(HideDownloadButton);
+    BOOL controlsVisible = [objc_getAssociatedObject(player, @selector(youModControlsOverlayVisible)) boolValue];
+    button.hidden = !IS_ENABLED(DownloadManager) || IS_ENABLED(HideDownloadButton) || !controlsVisible;
 }
+
+%hook YTMainAppControlsOverlayView
+
+- (void)setOverlayVisible:(BOOL)visible {
+    %orig;
+    YTPlayerViewController *player = YouModCurrentPlayerViewController;
+    if (player) {
+        objc_setAssociatedObject(player, @selector(youModControlsOverlayVisible), @(visible), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        UIButton *button = objc_getAssociatedObject(player, YouModOwnedDownloadButtonKey);
+        if (button)
+            button.hidden = !IS_ENABLED(DownloadManager) || IS_ENABLED(HideDownloadButton) || !visible;
+    }
+    YouModRecordDownloadDiagnostic(
+        @"YTMainAppControlsOverlayView controls visibility",
+        [NSString stringWithFormat:@"overlay=%@\nvisible=%@\ncurrentPlayer=%@\nbutton=%@\nbuttonHidden=%@",
+         self,
+         visible ? @"YES" : @"NO",
+         player,
+         player ? objc_getAssociatedObject(player, YouModOwnedDownloadButtonKey) : nil,
+         player ? ([objc_getAssociatedObject(player, YouModOwnedDownloadButtonKey) isHidden] ? @"YES" : @"NO") : @"(no player)"]
+    );
+}
+
+%end
 
 %hook YTPlayerViewController
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     YouModCurrentPlayerViewController = self;
+    if (!objc_getAssociatedObject(self, @selector(youModControlsOverlayVisible)))
+        objc_setAssociatedObject(self, @selector(youModControlsOverlayVisible), @NO, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     YouModLayoutOwnedDownloadButton(self);
 }
 
