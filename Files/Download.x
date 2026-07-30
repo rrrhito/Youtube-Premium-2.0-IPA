@@ -693,9 +693,13 @@ static NSURL *YouModDiagnosticLogURL(void) {
 static void YouModRecordDownloadDiagnostic(NSString *context, NSString *details) {
     if (context.length == 0 && details.length == 0) return;
 
-    NSDateFormatter *formatter = [NSDateFormatter new];
-    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-    formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss ZZZZZ";
+    static NSDateFormatter *formatter;
+    static dispatch_once_t formatterOnceToken;
+    dispatch_once(&formatterOnceToken, ^{
+        formatter = [NSDateFormatter new];
+        formatter.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+        formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss ZZZZZ";
+    });
     NSString *timestamp = [formatter stringFromDate:NSDate.date];
     NSString *entry = [NSString stringWithFormat:@"[%@]\n%@\n%@\n\n", timestamp ?: @"", context ?: @"", details ?: @""];
     YouModLastDownloadDiagnostic = entry;
@@ -2346,11 +2350,32 @@ void YouModConfigureDownloadButton(_ASDisplayView *view) {
     objc_setAssociatedObject(view, @selector(YouModDownloadButtonTapped:), @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
+// Scoped to identifiers that plausibly relate to the download/offline/upsell
+// flow under investigation. The first implementation logged every
+// accessibility identifier set anywhere in the app (there are hundreds during
+// normal launch/layout), doing synchronous disk I/O on each call from
+// whatever thread was setting the identifier -- this blocked the main thread
+// long enough to trigger an iOS watchdog kill a few seconds after launch
+// (2026-07-30, found by reading the diff after a report of "launches, freezes
+// a few seconds, crashes"). Narrowing to relevant identifiers keeps the
+// diagnostic useful while cutting call volume by orders of magnitude.
+static BOOL YouModIdentifierLooksDownloadRelated(NSString *identifier) {
+    static NSArray<NSString *> *keywords;
+    static dispatch_once_t keywordsOnceToken;
+    dispatch_once(&keywordsOnceToken, ^{
+        keywords = @[@"offline", @"download", @"add_to", @"upsell", @"premium"];
+    });
+    for (NSString *keyword in keywords) {
+        if ([identifier rangeOfString:keyword options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
 %hook UIView
 
 - (void)setAccessibilityIdentifier:(NSString *)accessibilityIdentifier {
     %orig;
-    if (accessibilityIdentifier.length) {
+    if (accessibilityIdentifier.length && YouModIdentifierLooksDownloadRelated(accessibilityIdentifier)) {
         YouModRecordDownloadDiagnostic(
             @"UIView accessibility identifier",
             [NSString stringWithFormat:@"class=%@\nidentifier=%@",
