@@ -2605,7 +2605,7 @@ static BOOL YouModTakeOverDownloadEvent(UIView *sender) {
     YouModRecordDownloadDiagnostic(
         @"Slim action bar didTapButton hook fired",
         [NSString stringWithFormat:@"controller=%@\nbutton=%@\nview=%@",
-         NSStringFromClass(self.class), button, view]
+         NSStringFromClass(object_getClass(self)), button, view]
     );
 
     BOOL hasOfflineSelector = [button respondsToSelector:@selector(slimButton_isOfflineButton)];
