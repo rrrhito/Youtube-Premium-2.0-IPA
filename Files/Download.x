@@ -2426,11 +2426,8 @@ static BOOL YouModIdentifierLooksDownloadRelated(NSString *identifier) {
 
 %end
 
-// Discover the actual responder-event path used by the current YouTube build
-// without assuming a fixed list of event classes. Only classes that implement
-// -send themselves are hooked; inherited implementations are logged by their
-// hooked ResponderEvent superclass while retaining the concrete runtime class
-// name in the diagnostic entry.
+// Probe only the responder-event classes relevant to the download path. Only
+// classes that implement -send themselves are hooked.
 static NSDictionary<NSString *, NSValue *> *YouModResponderEventSendImplementations;
 
 static IMP YouModOriginalResponderEventSendImplementation(id object) {
@@ -2452,21 +2449,39 @@ static void YouModDiagnosticResponderEventSend(id self, SEL _cmd) {
 }
 
 static void YouModInstallResponderEventDiagnostics(void) {
-    int classCount = objc_getClassList(NULL, 0);
-    if (classCount <= 0) return;
+    NSArray<NSString *> *classNames = @[
+        @"YTOfflineButtonPressedResponderEvent",
+        @"YTUpsellResponderEvent",
+        @"YTOfflineButtonPromoResponderEvent",
+        @"YTAccountScopedCommandResponderEvent",
+        @"YTToastResponderEvent",
+    ];
+    NSMutableArray<Class> *classes = [NSMutableArray arrayWithCapacity:classNames.count];
+    for (NSString *className in classNames) {
+        Class cls = NSClassFromString(className);
+        if (cls) [classes addObject:cls];
+    }
 
-    int classCapacity = classCount;
-    Class *classes = (__unsafe_unretained Class *)calloc((size_t)classCapacity, sizeof(Class));
-    if (!classes) return;
-    classCount = MIN(objc_getClassList(classes, classCapacity), classCapacity);
+    // These hooks can share the dynamic receiver, so hooking two classes in the
+    // same inheritance chain would make the original-IMP lookup ambiguous.
+    for (Class cls in classes) {
+        for (Class superclass = class_getSuperclass(cls); superclass; superclass = class_getSuperclass(superclass)) {
+            if ([classes containsObject:superclass]) {
+                YouModRecordDownloadDiagnostic(
+                    @"ResponderEvent diagnostic hook skipped",
+                    [NSString stringWithFormat:@"%@ is a subclass of %@",
+                     NSStringFromClass(cls), NSStringFromClass(superclass)]
+                );
+                return;
+            }
+        }
+    }
 
     NSMutableDictionary<NSString *, NSValue *> *implementations = [NSMutableDictionary dictionary];
     YouModResponderEventSendImplementations = implementations;
     SEL sendSelector = @selector(send);
-    for (int index = 0; index < classCount; index++) {
-        Class cls = classes[index];
+    for (Class cls in classes) {
         NSString *className = NSStringFromClass(cls);
-        if (![className hasSuffix:@"ResponderEvent"]) continue;
 
         unsigned int methodCount = 0;
         Method *methods = class_copyMethodList(cls, &methodCount);
@@ -2484,7 +2499,6 @@ static void YouModInstallResponderEventDiagnostics(void) {
         MSHookMessageEx(cls, sendSelector, (IMP)YouModDiagnosticResponderEventSend, &original);
         if (original) implementations[className] = [NSValue valueWithPointer:original];
     }
-    free(classes);
     YouModResponderEventSendImplementations = implementations.copy;
 }
 
