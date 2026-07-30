@@ -1759,6 +1759,26 @@ static YouModMediaFormat *YouModMediaFormatFromStream(id stream, BOOL video) {
     if (url.length == 0) {
         if (cipher.length) url = YouModResolvedCipherURLs[cipher];
     }
+    NSURLComponents *streamURLComponents = url.length
+        ? [NSURLComponents componentsWithString:url]
+        : nil;
+    NSString *streamURLScheme = streamURLComponents.scheme.lowercaseString;
+    BOOL hasAbsoluteHTTPURL =
+        ([streamURLScheme isEqualToString:@"https"] || [streamURLScheme isEqualToString:@"http"]) &&
+        streamURLComponents.host.length > 0;
+    if (url.length > 0 && !hasAbsoluteHTTPURL) {
+        YouModRecordDownloadDiagnostic(
+            @"Media format rejected",
+            [NSString stringWithFormat:
+                @"reason=relative or unsupported URL class=%@ itag=%ld scheme=%@ host=%@ absoluteLength=%lu",
+             NSStringFromClass([stream class]),
+             (long)YouModIntegerFromSelector(stream, @selector(itag)),
+             streamURLComponents.scheme ?: @"(nil)",
+             streamURLComponents.host ?: @"(nil)",
+             (unsigned long)url.length]
+        );
+        url = nil;
+    }
     if (url.length == 0) {
         NSInteger rejectedItag = YouModIntegerFromSelector(stream, @selector(itag));
         if (rejectedItag == 0) rejectedItag = YouModIntegerFromSelector(formatStream, @selector(itag));
