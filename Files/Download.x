@@ -809,11 +809,17 @@ static NSString *YouModRuntimeSurfaceForObject(id object) {
         methodNames.count ? [[methodNames array] componentsJoinedByString:@", "] : @"(none)"];
 }
 
+static NSString *YouModLatestCipherResolutionSummary;
+
 static NSString *YouModDownloadDiagnosticText(void) {
     NSString *log = [NSString stringWithContentsOfURL:YouModDiagnosticLogURL() encoding:NSUTF8StringEncoding error:nil];
-    if (log.length == 0) return YouModLastDownloadDiagnostic;
+    if (log.length == 0) log = YouModLastDownloadDiagnostic;
     NSUInteger maxLength = 60000;
-    return log.length > maxLength ? [log substringFromIndex:log.length - maxLength] : log;
+    if (log.length > maxLength) log = [log substringFromIndex:log.length - maxLength];
+    if (YouModLatestCipherResolutionSummary.length)
+        log = [log stringByAppendingFormat:@"\n\n===== LATEST CIPHER SUMMARY =====\n%@\n",
+               YouModLatestCipherResolutionSummary];
+    return log;
 }
 
 void YouModCopyDownloadDiagnostics(UIViewController *presenter) {
@@ -1360,7 +1366,8 @@ static void YouModEmitCipherResolutionSummaryIfReady(void) {
          (unsigned long)YouModDiagnosticCipherAttempted, (unsigned long)YouModDiagnosticCipherResolved],
     ]];
     [lines addObjectsFromArray:YouModDiagnosticAcceptedVideoFormats ?: @[]];
-    YouModRecordDownloadDiagnostic(@"signatureCipher resolution summary", [lines componentsJoinedByString:@"\n"]);
+    YouModLatestCipherResolutionSummary = [lines componentsJoinedByString:@"\n"];
+    YouModRecordDownloadDiagnostic(@"signatureCipher resolution summary", YouModLatestCipherResolutionSummary);
     YouModDiagnosticResolutionSummaryEmitted = YES;
 }
 
@@ -1768,17 +1775,14 @@ static NSArray *YouModAdaptiveFormatObjectsForPlayer(YTPlayerViewController *pla
     YouModRecordDownloadDiagnostic(
         @"Available media format sources",
         [NSString stringWithFormat:
-            @"player=%@\nactiveVideo=%@\nstreamingData=%@\nadaptiveStreams=%lu\nselectableVideoFormats=%lu\nresponses=%@\nuniqueCandidateStreams=%lu\n\nplayer runtime surface:\n%@\n\nactiveVideo runtime surface:\n%@\n\nstreamingData runtime surface:\n%@",
+            @"player=%@\nactiveVideo=%@\nstreamingData=%@\nadaptiveStreams=%lu\nselectableVideoFormats=%lu\nresponses=%@\nuniqueCandidateStreams=%lu",
             NSStringFromClass([player class]),
             NSStringFromClass([activeVideo class]),
             NSStringFromClass([streamingData class]),
             (unsigned long)([activeAdaptiveStreams isKindOfClass:NSArray.class] ? activeAdaptiveStreams.count : 0),
             (unsigned long)([selectableVideoFormats isKindOfClass:NSArray.class] ? selectableVideoFormats.count : 0),
             responseDetails.count ? [responseDetails componentsJoinedByString:@"\n"] : @"(none)",
-            (unsigned long)formats.count,
-            YouModRuntimeSurfaceForObject(player),
-            YouModRuntimeSurfaceForObject(activeVideo),
-            YouModRuntimeSurfaceForObject(streamingData)]
+            (unsigned long)formats.count]
     );
     return formats.copy;
 }
@@ -1801,7 +1805,8 @@ static YouModMediaFormat *YouModMediaFormatFromStream(id stream, BOOL video) {
         if (rejectedMimeType.length == 0) rejectedMimeType = YouModStringFromSelector(formatStream, @selector(mimeType));
         NSString *rejectionKey = [NSString stringWithFormat:@"%ld|%@|%@",
             (long)rejectedItag, rejectedMimeType ?: @"", cipher ?: @""];
-        if (![YouModLoggedRejectedStreamKeys containsObject:rejectionKey]) {
+        if (![YouModLoggedRejectedStreamKeys containsObject:rejectionKey] &&
+            YouModLoggedRejectedStreamKeys.count < 8) {
             [YouModLoggedRejectedStreamKeys addObject:rejectionKey];
             YouModRecordDownloadDiagnostic(
                 @"Media format rejected",
