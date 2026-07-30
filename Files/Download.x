@@ -2512,6 +2512,43 @@ static void YouModInstallResponderEventDiagnostics(void) {
     YouModResponderEventSendImplementations = implementations.copy;
 }
 
+static void YouModRecordSlimActionBarHookInstallationDiagnostics(void) {
+    NSString *className = @"YTSlimVideoScrollableActionBarCellController";
+    Class cls = NSClassFromString(className);
+    SEL selector = @selector(didTapButton:fromRect:inView:);
+    BOOL responds = cls && [(id)cls instancesRespondToSelector:selector];
+
+    YouModRecordDownloadDiagnostic(
+        @"Slim action bar hook installation",
+        [NSString stringWithFormat:@"class=%@\nNSClassFromString=%@\ninstancesRespondToSelector(%@)=%@",
+         className,
+         cls ? @"YES" : @"NO",
+         NSStringFromSelector(selector),
+         responds ? @"YES" : @"NO"]
+    );
+
+    if (!cls) return;
+
+    unsigned int methodCount = 0;
+    Method *methods = class_copyMethodList(cls, &methodCount);
+    NSMutableArray<NSString *> *matchingSelectors = [NSMutableArray array];
+    for (unsigned int methodIndex = 0; methodIndex < methodCount; methodIndex++) {
+        NSString *selectorName = NSStringFromSelector(method_getName(methods[methodIndex]));
+        if ([selectorName rangeOfString:@"didTapButton" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [selectorName rangeOfString:@"tapButton" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            [matchingSelectors addObject:selectorName];
+        }
+    }
+    free(methods);
+
+    YouModRecordDownloadDiagnostic(
+        @"Slim action bar runtime tap methods",
+        [NSString stringWithFormat:@"class=%@\nmatchingSelectors=%@",
+         className,
+         matchingSelectors.count ? [matchingSelectors componentsJoinedByString:@", "] : @"(none)"]
+    );
+}
+
 // YouTube reworked the under-player action bar (seen from 21.22), moving the
 // download entry into a dialog, so the identifier the gesture above relies on is
 // no longer a dependable way to reach the download manager. These two events are
@@ -2565,11 +2602,35 @@ static BOOL YouModTakeOverDownloadEvent(UIView *sender) {
 - (void)didTapButton:(YTISlimMetadataButtonSupportedRenderers *)button
             fromRect:(CGRect)rect
               inView:(UIView *)view {
-    if ([button respondsToSelector:@selector(slimButton_isOfflineButton)] &&
-        [button slimButton_isOfflineButton] &&
-        YouModTakeOverDownloadEvent(view)) {
-        return;
+    YouModRecordDownloadDiagnostic(
+        @"Slim action bar didTapButton hook fired",
+        [NSString stringWithFormat:@"controller=%@\nbutton=%@\nview=%@",
+         NSStringFromClass(self.class), button, view]
+    );
+
+    BOOL hasOfflineSelector = [button respondsToSelector:@selector(slimButton_isOfflineButton)];
+    BOOL isOfflineButton = hasOfflineSelector ? [button slimButton_isOfflineButton] : NO;
+    YouModRecordDownloadDiagnostic(
+        @"Slim action bar offline flag",
+        [NSString stringWithFormat:@"respondsToSelector=%@\nslimButton_isOfflineButton=%@",
+         hasOfflineSelector ? @"YES" : @"NO",
+         isOfflineButton ? @"YES" : @"NO"]
+    );
+
+    if (hasOfflineSelector && isOfflineButton) {
+        if (YouModTakeOverDownloadEvent(view)) {
+            YouModRecordDownloadDiagnostic(
+                @"Slim action bar hook branch",
+                @"routed to YouModTakeOverDownloadEvent"
+            );
+            return;
+        }
     }
+
+    YouModRecordDownloadDiagnostic(
+        @"Slim action bar hook branch",
+        @"fell through to %orig"
+    );
     %orig;
 }
 
@@ -2664,6 +2725,7 @@ NSString *YouModGlobalAuthHeader = nil;
 %ctor {
     %init;
     dispatch_async(dispatch_get_main_queue(), ^{
+        YouModRecordSlimActionBarHookInstallationDiagnostics();
         YouModInstallResponderEventDiagnostics();
     });
 }
