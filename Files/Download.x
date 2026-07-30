@@ -44,29 +44,6 @@ extern void MSHookMessageEx(Class class, SEL selector, IMP replacement, IMP *res
 - (NSString *)shortDescription;
 @end
 
-// The two events a download travels on, hooked below so the download manager
-// keeps working across YouTube's action bar redesigns. YTUpsellResponderEvent is
-// the one used when the account has no Premium subscription.
-@interface YTOfflineButtonPressedResponderEvent : NSObject
-- (UIView *)fromView;
-- (void)send;
-@end
-
-@interface YTUpsellResponderEvent : NSObject
-- (void)send;
-@end
-
-@interface YTISlimMetadataButtonSupportedRenderers : NSObject
-- (BOOL)slimButton_isOfflineButton;
-@end
-
-static const void *YouModOfflineUpsellKey = &YouModOfflineUpsellKey;
-
-static id YouModMarkOfflineUpsell(id event) {
-    if (event) objc_setAssociatedObject(event, YouModOfflineUpsellKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    return event;
-}
-
 static UIImage *YouModIconImage(NSInteger iconType) {
     YTIIcon *icon = [%c(YTIIcon) new];
     icon.iconType = iconType;
@@ -2592,100 +2569,84 @@ static BOOL YouModTakeOverDownloadEvent(UIView *sender) {
     return YES;
 }
 
-// YouTube 21.28.3's slim action bar does not attach its tap recognizer to the
-// YTTransferButton. YTSlimVideoDetailsActionView owns the recognizer and calls
-// this delegate entry point with its supported renderer and visible button.
-// Intercept the offline branch before YouTube turns the renderer's command into
-// a Premium upsell.
-%hook YTSlimVideoScrollableActionBarCellController
+static const void *YouModOwnedDownloadButtonKey = &YouModOwnedDownloadButtonKey;
 
-- (void)didTapButton:(YTISlimMetadataButtonSupportedRenderers *)button
-            fromRect:(CGRect)rect
-              inView:(UIView *)view {
+static UIButton *YouModOwnedDownloadButton(YTPlayerViewController *player) {
+    UIButton *button = objc_getAssociatedObject(player, YouModOwnedDownloadButtonKey);
+    if (button) return button;
+
+    button = [UIButton buttonWithType:UIButtonTypeSystem];
+    button.accessibilityIdentifier = @"youmod.owned.download.button";
+    button.accessibilityLabel = @"Open YouMod download manager";
+    [button setTitle:@"↓ YouMod DL" forState:UIControlStateNormal];
+    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
+    button.backgroundColor = [UIColor colorWithRed:0.36 green:0.18 blue:0.78 alpha:0.94];
+    button.layer.cornerRadius = 18.0;
+    button.layer.shadowColor = UIColor.blackColor.CGColor;
+    button.layer.shadowOpacity = 0.28;
+    button.layer.shadowRadius = 3.0;
+    button.layer.shadowOffset = CGSizeMake(0.0, 1.0);
+    [button addTarget:player
+               action:@selector(youModOwnedDownloadButtonTapped:)
+     forControlEvents:UIControlEventTouchUpInside];
+
+    objc_setAssociatedObject(player, YouModOwnedDownloadButtonKey, button, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [player.view addSubview:button];
     YouModRecordDownloadDiagnostic(
-        @"Slim action bar didTapButton hook fired",
-        [NSString stringWithFormat:@"controller=%@\nbutton=%@\nview=%@",
-         NSStringFromClass(object_getClass(self)), button, view]
+        @"YouMod-owned download button inserted",
+        [NSString stringWithFormat:@"player=%@\nbutton=%@", player, button]
     );
-
-    BOOL hasOfflineSelector = [button respondsToSelector:@selector(slimButton_isOfflineButton)];
-    BOOL isOfflineButton = hasOfflineSelector ? [button slimButton_isOfflineButton] : NO;
-    YouModRecordDownloadDiagnostic(
-        @"Slim action bar offline flag",
-        [NSString stringWithFormat:@"respondsToSelector=%@\nslimButton_isOfflineButton=%@",
-         hasOfflineSelector ? @"YES" : @"NO",
-         isOfflineButton ? @"YES" : @"NO"]
-    );
-
-    if (hasOfflineSelector && isOfflineButton) {
-        if (YouModTakeOverDownloadEvent(view)) {
-            YouModRecordDownloadDiagnostic(
-                @"Slim action bar hook branch",
-                @"routed to YouModTakeOverDownloadEvent"
-            );
-            return;
-        }
-    }
-
-    YouModRecordDownloadDiagnostic(
-        @"Slim action bar hook branch",
-        @"fell through to %orig"
-    );
-    %orig;
+    return button;
 }
 
-%end
+static void YouModLayoutOwnedDownloadButton(YTPlayerViewController *player) {
+    UIButton *button = YouModOwnedDownloadButton(player);
+    UIView *container = player.view;
+    if (!container || !button) return;
 
-%hook YTOfflineButtonPressedResponderEvent
-
-- (void)send {
-    UIView *sender = YouModObjectFromSelector(self, @selector(fromView));
-    if (![sender isKindOfClass:UIView.class]) sender = nil;
-    if (!YouModTakeOverDownloadEvent(sender)) %orig;
+    UIEdgeInsets safeArea = container.safeAreaInsets;
+    CGFloat width = 112.0;
+    CGFloat height = 36.0;
+    CGFloat x = MAX(12.0, CGRectGetWidth(container.bounds) - safeArea.right - width - 12.0);
+    CGFloat y = MAX(safeArea.top + 12.0, 12.0);
+    button.frame = CGRectMake(x, y, width, height);
+    [container bringSubviewToFront:button];
+    button.hidden = !IS_ENABLED(DownloadManager) || IS_ENABLED(HideDownloadButton);
 }
-
-%end
-
-// Without a Premium subscription the download never reaches the event above:
-// YouTube builds a YTUpsellResponderEvent through one of its offline factories
-// and sends that instead, which is what raises the Premium screen. The class is
-// shared with unrelated upsells (background play, higher qualities, ...), so only
-// the events coming out of those offline factories are marked and taken over.
-%hook YTUpsellResponderEvent
-
-+ (instancetype)eventWithOfflineUpsell:(id)upsell videoID:(NSString *)videoID firstResponder:(id)firstResponder {
-    return YouModMarkOfflineUpsell(%orig);
-}
-
-+ (instancetype)eventWithOfflineUpsell:(id)upsell videoID:(NSString *)videoID playlistID:(NSString *)playlistID firstResponder:(id)firstResponder {
-    return YouModMarkOfflineUpsell(%orig);
-}
-
-+ (instancetype)eventWithOfflineUpsell:(id)upsell videoID:(NSString *)videoID playlistID:(NSString *)playlistID cancelBlock:(id)cancelBlock firstResponder:(id)firstResponder {
-    return YouModMarkOfflineUpsell(%orig);
-}
-
-- (void)send {
-    if (!objc_getAssociatedObject(self, YouModOfflineUpsellKey)) {
-        %orig;
-        return;
-    }
-    if (!YouModTakeOverDownloadEvent(nil)) %orig;
-}
-
-%end
 
 %hook YTPlayerViewController
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     YouModCurrentPlayerViewController = self;
+    YouModLayoutOwnedDownloadButton(self);
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    YouModLayoutOwnedDownloadButton(self);
 }
 
 - (void)viewWillDisappear:(BOOL)animated {
     %orig;
     if (YouModCurrentPlayerViewController == self)
         YouModCurrentPlayerViewController = nil;
+}
+
+%new
+- (void)youModOwnedDownloadButtonTapped:(UIButton *)sender {
+    YouModRecordDownloadDiagnostic(
+        @"YouMod-owned download button tap fired",
+        [NSString stringWithFormat:@"player=%@\nsender=%@", self, sender]
+    );
+    BOOL reachedDownloadManager = YouModTakeOverDownloadEvent(sender);
+    YouModRecordDownloadDiagnostic(
+        @"YouMod-owned download button tap result",
+        reachedDownloadManager
+            ? @"reached YouModTakeOverDownloadEvent -> YouModShowDownloadManager"
+            : @"YouModTakeOverDownloadEvent returned NO before YouModShowDownloadManager"
+    );
 }
 
 %end
