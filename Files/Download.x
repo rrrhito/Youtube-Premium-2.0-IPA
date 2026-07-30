@@ -1615,9 +1615,10 @@ static void YouModResolveCipherStreamsWithPlayerJS(YTPlayerViewController *playe
     }] resume];
 }
 
-static void YouModFetchFallbackPlayerFormats(YTPlayerViewController *player,
-                                             NSString *html,
-                                             NSString *playerJSURL) {
+static void YouModFetchFallbackPlayerFormatsWithSTS(YTPlayerViewController *player,
+                                                    NSString *html,
+                                                    NSString *playerJSURL,
+                                                    NSInteger signatureTimestamp) {
     NSString *apiKey = YouModFirstRegexCapture(html, @[
         @"[\"']INNERTUBE_API_KEY[\"']\\s*:\\s*[\"']([^\"']+)[\"']"
     ]);
@@ -1648,7 +1649,13 @@ static void YouModFetchFallbackPlayerFormats(YTPlayerViewController *player,
             @"clientScreen": @"EMBED"
         }},
         @"videoId": videoID,
-        @"thirdParty": @{@"embedUrl": @"https://www.youtube.com/"}
+        @"thirdParty": @{@"embedUrl": @"https://www.youtube.com/"},
+        @"playbackContext": @{@"contentPlaybackContext": @{
+            @"html5Preference": @"HTML5_PREF_WANTS",
+            @"signatureTimestamp": @(signatureTimestamp)
+        }},
+        @"contentCheckOk": @YES,
+        @"racyCheckOk": @YES
     };
     NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     NSMutableURLRequest *request =
@@ -1679,7 +1686,8 @@ static void YouModFetchFallbackPlayerFormats(YTPlayerViewController *player,
         YouModRecordDownloadDiagnostic(
             @"Fallback player response",
             [NSString stringWithFormat:
-                @"httpStatus=%ld\nbytes=%lu\nstatus=%@\nreason=%@\nadaptiveFormats=%lu\nprogressiveFormats=%lu",
+                @"signatureTimestamp=%ld\nhttpStatus=%ld\nbytes=%lu\nstatus=%@\nreason=%@\nadaptiveFormats=%lu\nprogressiveFormats=%lu",
+             (long)signatureTimestamp,
              (long)[(NSHTTPURLResponse *)response statusCode],
              (unsigned long)data.length,
              playability[@"status"] ?: @"(none)",
@@ -1688,6 +1696,34 @@ static void YouModFetchFallbackPlayerFormats(YTPlayerViewController *player,
              (unsigned long)([progressive isKindOfClass:NSArray.class] ? progressive.count : 0)]
         );
         YouModResolveCipherStreamsWithPlayerJS(player, playerJSURL);
+    }] resume];
+}
+
+static void YouModFetchFallbackPlayerFormats(YTPlayerViewController *player,
+                                             NSString *html,
+                                             NSString *playerJSURL) {
+    NSMutableURLRequest *request =
+        [NSMutableURLRequest requestWithURL:[NSURL URLWithString:playerJSURL]];
+    [request setValue:YouModNativeUserAgent() forHTTPHeaderField:@"User-Agent"];
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request
+        completionHandler:^(NSData *data, __unused NSURLResponse *response, NSError *error) {
+        NSString *javascript = data.length
+            ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+            : nil;
+        NSString *stsString = YouModFirstRegexCapture(javascript, @[
+            @"signatureTimestamp\\s*[:=]\\s*(\\d+)"
+        ]);
+        NSInteger sts = stsString.integerValue;
+        if (sts <= 0) {
+            YouModRecordDownloadDiagnostic(
+                @"Fallback player response",
+                [NSString stringWithFormat:@"result=signature timestamp unavailable\nplayerJsBytes=%lu\nerror=%@",
+                 (unsigned long)data.length, error.localizedDescription ?: @"(none)"]
+            );
+            YouModResolveCipherStreamsWithPlayerJS(player, playerJSURL);
+            return;
+        }
+        YouModFetchFallbackPlayerFormatsWithSTS(player, html, playerJSURL, sts);
     }] resume];
 }
 
