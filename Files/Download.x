@@ -1310,6 +1310,59 @@ static BOOL YouModCipherResolutionInProgress;
 static BOOL YouModCipherResolutionAttempted;
 static NSMutableArray *YouModCipherResolutionCompletions;
 static NSArray *YouModAdaptiveFormatObjectsForPlayer(YTPlayerViewController *player);
+static NSString *YouModCipherDiagnosticVideoID;
+static NSMutableSet<NSString *> *YouModLoggedRejectedStreamKeys;
+static NSString *YouModDiagnosticPlayerJSURLSource;
+static NSInteger YouModDiagnosticPlayerJSHTTPStatus;
+static NSUInteger YouModDiagnosticPlayerJSBytes;
+static NSString *YouModDiagnosticSignatureName;
+static NSUInteger YouModDiagnosticSignatureSourceLength;
+static NSString *YouModDiagnosticNName;
+static NSUInteger YouModDiagnosticNSourceLength;
+static NSString *YouModDiagnosticJSException;
+static NSUInteger YouModDiagnosticCipherAttempted;
+static NSUInteger YouModDiagnosticCipherResolved;
+static NSArray<NSString *> *YouModDiagnosticAcceptedVideoFormats;
+static BOOL YouModDiagnosticResolutionSummaryEmitted;
+
+static void YouModPrepareCipherDiagnosticScope(NSString *videoID) {
+    videoID = videoID ?: @"";
+    if ([YouModCipherDiagnosticVideoID isEqualToString:videoID]) return;
+    YouModCipherDiagnosticVideoID = videoID;
+    YouModLoggedRejectedStreamKeys = [NSMutableSet set];
+    YouModDiagnosticPlayerJSURLSource = @"none";
+    YouModDiagnosticPlayerJSHTTPStatus = 0;
+    YouModDiagnosticPlayerJSBytes = 0;
+    YouModDiagnosticSignatureName = nil;
+    YouModDiagnosticSignatureSourceLength = 0;
+    YouModDiagnosticNName = nil;
+    YouModDiagnosticNSourceLength = 0;
+    YouModDiagnosticJSException = nil;
+    YouModDiagnosticCipherAttempted = 0;
+    YouModDiagnosticCipherResolved = 0;
+    YouModDiagnosticAcceptedVideoFormats = nil;
+    YouModDiagnosticResolutionSummaryEmitted = NO;
+}
+
+static void YouModEmitCipherResolutionSummaryIfReady(void) {
+    if (!YouModCipherResolutionAttempted || YouModCipherResolutionInProgress || YouModDiagnosticResolutionSummaryEmitted)
+        return;
+    NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithArray:@[
+        [NSString stringWithFormat:@"playerJsUrlSource=%@", YouModDiagnosticPlayerJSURLSource ?: @"none"],
+        [NSString stringWithFormat:@"playerJsHttpStatus=%ld", (long)YouModDiagnosticPlayerJSHTTPStatus],
+        [NSString stringWithFormat:@"playerJsBytes=%lu", (unsigned long)YouModDiagnosticPlayerJSBytes],
+        [NSString stringWithFormat:@"signatureName=%@ signatureSourceLength=%lu",
+         YouModDiagnosticSignatureName ?: @"(not found)", (unsigned long)YouModDiagnosticSignatureSourceLength],
+        [NSString stringWithFormat:@"nName=%@ nSourceLength=%lu",
+         YouModDiagnosticNName ?: @"(not found)", (unsigned long)YouModDiagnosticNSourceLength],
+        [NSString stringWithFormat:@"jsException=%@", YouModDiagnosticJSException ?: @"(none)"],
+        [NSString stringWithFormat:@"attempted=%lu resolved=%lu",
+         (unsigned long)YouModDiagnosticCipherAttempted, (unsigned long)YouModDiagnosticCipherResolved],
+    ]];
+    [lines addObjectsFromArray:YouModDiagnosticAcceptedVideoFormats ?: @[]];
+    YouModRecordDownloadDiagnostic(@"signatureCipher resolution summary", [lines componentsJoinedByString:@"\n"]);
+    YouModDiagnosticResolutionSummaryEmitted = YES;
+}
 
 static NSString *YouModQueryValue(NSString *query, NSString *name) {
     if (query.length == 0 || name.length == 0) return nil;
@@ -1438,6 +1491,10 @@ static NSDictionary<NSString *, NSString *> *YouModExtractPlayerTransforms(NSStr
     ]);
     NSString *signatureSource = YouModExecutableTransformSource(javascript, signatureName);
     NSString *nSource = YouModExecutableTransformSource(javascript, nName);
+    YouModDiagnosticSignatureName = signatureName;
+    YouModDiagnosticSignatureSourceLength = signatureSource.length;
+    YouModDiagnosticNName = nName;
+    YouModDiagnosticNSourceLength = nSource.length;
     YouModRecordDownloadDiagnostic(
         @"Player JS transform extraction",
         [NSString stringWithFormat:@"javascriptLength=%lu\nsignatureName=%@\nsignatureSourceLength=%lu\nnName=%@\nnSourceLength=%lu",
@@ -1470,6 +1527,8 @@ static NSString *YouModExecuteTransform(NSString *source, NSString *name, NSStri
     JSValue *function = context[name];
     JSValue *result = function.isObject ? [function callWithArguments:@[input]] : nil;
     NSString *output = result.isString ? result.toString : nil;
+    if (exceptionText.length)
+        YouModDiagnosticJSException = [NSString stringWithFormat:@"%@:%@", kind ?: @"transform", exceptionText];
     YouModRecordDownloadDiagnostic(
         @"Player JS transform execution",
         [NSString stringWithFormat:@"kind=%@\nfunction=%@\ninputLength=%lu\noutputLength=%lu\nchanged=%@\nexception=%@",
@@ -1530,6 +1589,7 @@ static NSString *YouModPlayerJSURLFromResponses(YTPlayerViewController *player) 
                 NSString *value = YouModStringFromSelector(object, NSSelectorFromString(selectorName));
                 NSString *normalized = YouModNormalizedPlayerJSURL(value);
                 if (normalized.length) {
+                    YouModDiagnosticPlayerJSURLSource = @"in-app";
                     YouModRecordDownloadDiagnostic(@"Player JS URL acquisition", [NSString stringWithFormat:@"path=in-app\nclass=%@\nselector=%@\nurl=%@", NSStringFromClass([object class]), selectorName, normalized]);
                     return normalized;
                 }
@@ -1558,6 +1618,8 @@ static void YouModResolveCipherStreamsWithPlayerJS(YTPlayerViewController *playe
     }
     [[[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSString *javascript = data.length ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+        YouModDiagnosticPlayerJSHTTPStatus = [(NSHTTPURLResponse *)response statusCode];
+        YouModDiagnosticPlayerJSBytes = data.length;
         YouModRecordDownloadDiagnostic(
             @"Player JS fetch",
             [NSString stringWithFormat:@"url=%@\nhttpStatus=%ld\nbytes=%lu\nerror=%@",
@@ -1580,6 +1642,8 @@ static void YouModResolveCipherStreamsWithPlayerJS(YTPlayerViewController *playe
                 resolved++;
             }
         }
+        YouModDiagnosticCipherAttempted = attempted;
+        YouModDiagnosticCipherResolved = resolved;
         YouModRecordDownloadDiagnostic(@"signatureCipher resolution summary", [NSString stringWithFormat:@"attempted=%lu\nresolved=%lu", (unsigned long)attempted, (unsigned long)resolved]);
         YouModFinishCipherResolution();
     }] resume];
@@ -1594,6 +1658,7 @@ static void YouModBeginCipherResolution(YTPlayerViewController *player, void (^c
         YouModResolvedCipherURLs = [NSMutableDictionary dictionary];
         YouModCipherResolutionCompletions = [NSMutableArray array];
     }
+    YouModPrepareCipherDiagnosticScope(videoID);
     if (completion) [YouModCipherResolutionCompletions addObject:[completion copy]];
     if (YouModCipherResolutionInProgress) return;
     if (YouModCipherResolutionAttempted) {
@@ -1616,6 +1681,11 @@ static void YouModBeginCipherResolution(YTPlayerViewController *player, void (^c
         NSString *html = data.length ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
         NSString *path = YouModFirstRegexCapture(html, @[@"[\"']jsUrl[\"']\\s*:\\s*[\"']([^\"']+)[\"']", @"/s/player/[A-Za-z0-9_-]+/[^\"']+\\.js"]);
         NSString *playerJSURL = YouModNormalizedPlayerJSURL(path);
+        YouModDiagnosticPlayerJSURLSource = playerJSURL.length ? @"embed" : @"none";
+        if (!playerJSURL.length) {
+            YouModDiagnosticPlayerJSHTTPStatus = [(NSHTTPURLResponse *)response statusCode];
+            YouModDiagnosticPlayerJSBytes = data.length;
+        }
         YouModRecordDownloadDiagnostic(
             @"Player JS URL acquisition",
             [NSString stringWithFormat:@"path=embed\nhttpStatus=%ld\nbytes=%lu\nurl=%@\nerror=%@",
@@ -1715,22 +1785,30 @@ static NSArray *YouModAdaptiveFormatObjectsForPlayer(YTPlayerViewController *pla
 
 static YouModMediaFormat *YouModMediaFormatFromStream(id stream, BOOL video) {
     id formatStream = YouModObjectFromSelector(stream, @selector(formatStream));
+    NSString *cipher = YouModStringFromSelector(stream, @selector(signatureCipher));
+    if (cipher.length == 0) cipher = YouModStringFromSelector(formatStream, @selector(signatureCipher));
     NSString *url = YouModStringFromSelector(stream, @selector(URL));
     if (url.length == 0) url = YouModStringFromSelector(formatStream, @selector(URL));
     if (url.length == 0) url = YouModStringFromSelector(stream, @selector(url));
     if (url.length == 0) url = YouModStringFromSelector(formatStream, @selector(url));
     if (url.length == 0) {
-        NSString *cipher = YouModStringFromSelector(stream, @selector(signatureCipher));
-        if (cipher.length == 0) cipher = YouModStringFromSelector(formatStream, @selector(signatureCipher));
         if (cipher.length) url = YouModResolvedCipherURLs[cipher];
     }
     if (url.length == 0) {
-        YouModRecordDownloadDiagnostic(
-            @"Media format rejected: no URL",
-            [NSString stringWithFormat:@"stream runtime surface:\n%@\n\nformatStream runtime surface:\n%@",
-             YouModRuntimeSurfaceForObject(stream),
-             YouModRuntimeSurfaceForObject(formatStream)]
-        );
+        NSInteger rejectedItag = YouModIntegerFromSelector(stream, @selector(itag));
+        if (rejectedItag == 0) rejectedItag = YouModIntegerFromSelector(formatStream, @selector(itag));
+        NSString *rejectedMimeType = YouModStringFromSelector(stream, @selector(mimeType));
+        if (rejectedMimeType.length == 0) rejectedMimeType = YouModStringFromSelector(formatStream, @selector(mimeType));
+        NSString *rejectionKey = [NSString stringWithFormat:@"%ld|%@|%@",
+            (long)rejectedItag, rejectedMimeType ?: @"", cipher ?: @""];
+        if (![YouModLoggedRejectedStreamKeys containsObject:rejectionKey]) {
+            [YouModLoggedRejectedStreamKeys addObject:rejectionKey];
+            YouModRecordDownloadDiagnostic(
+                @"Media format rejected",
+                [NSString stringWithFormat:@"reason=no URL itag=%ld mimeType=%@",
+                 (long)rejectedItag, rejectedMimeType ?: @"(none)"]
+            );
+        }
         return nil;
     }
 
@@ -1875,6 +1953,7 @@ static NSString *YouModQualityLabel(NSInteger height, NSInteger fps, NSString *f
 }
 
 static NSArray <YouModMediaFormat *> *YouModFormatsForPlayer(YTPlayerViewController *player, BOOL video) {
+    YouModPrepareCipherDiagnosticScope(YouModVideoIDForPlayer(player));
     NSMutableArray *formats = [NSMutableArray array];
     NSArray *candidateStreams = YouModAdaptiveFormatObjectsForPlayer(player);
     for (id stream in candidateStreams) {
@@ -1922,6 +2001,26 @@ static NSArray <YouModMediaFormat *> *YouModFormatsForPlayer(YTPlayerViewControl
          (unsigned long)formats.count,
          (unsigned long)unique.count]
     );
+    if (video) {
+        NSMutableArray<NSString *> *acceptedLines = [NSMutableArray array];
+        for (YouModMediaFormat *format in unique) {
+            id source = format.source;
+            id formatStream = YouModObjectFromSelector(source, @selector(formatStream));
+            NSInteger itag = YouModIntegerFromSelector(source, @selector(itag));
+            if (itag == 0) itag = YouModIntegerFromSelector(formatStream, @selector(itag));
+            NSString *plaintextURL = YouModStringFromSelector(source, @selector(URL));
+            if (plaintextURL.length == 0) plaintextURL = YouModStringFromSelector(formatStream, @selector(URL));
+            if (plaintextURL.length == 0) plaintextURL = YouModStringFromSelector(source, @selector(url));
+            if (plaintextURL.length == 0) plaintextURL = YouModStringFromSelector(formatStream, @selector(url));
+            NSString *urlSource = plaintextURL.length ? @"plaintext" : @"resolvedCipher";
+            [acceptedLines addObject:[NSString stringWithFormat:
+                @"accepted video format: itag=%ld mimeType=%@ qualityLabel=%@ urlSource=%@",
+                (long)itag, format.mimeType ?: @"(none)", format.qualityLabel ?: @"(none)", urlSource]];
+        }
+        YouModDiagnosticAcceptedVideoFormats = acceptedLines.copy;
+    } else {
+        YouModEmitCipherResolutionSummaryIfReady();
+    }
     return unique.copy;
 }
 
