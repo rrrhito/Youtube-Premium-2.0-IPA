@@ -648,6 +648,20 @@ static NSString *YouModURLStringWithCPN(NSString *urlString) {
     return [NSString stringWithFormat:@"%@%@cpn=%@", urlString, separator, cpn];
 }
 
+static NSString *YouModSafeURLDiagnostic(NSURL *url) {
+    if (!url) return @"url=(nil)";
+    NSURLComponents *components = [NSURLComponents componentsWithURL:url resolvingAgainstBaseURL:NO];
+    return [NSString stringWithFormat:
+        @"scheme=%@\nhost=%@\nport=%@\npathLength=%lu\nqueryLength=%lu\nabsoluteLength=%lu\nisFileURL=%@",
+        components.scheme ?: url.scheme ?: @"(nil)",
+        components.host ?: url.host ?: @"(nil)",
+        components.port ?: @"(nil)",
+        (unsigned long)(components.path ?: url.path).length,
+        (unsigned long)(components.percentEncodedQuery ?: url.query).length,
+        (unsigned long)url.absoluteString.length,
+        url.isFileURL ? @"YES" : @"NO"];
+}
+
 static NSString *YouModSanitizedFileName(NSString *name) {
     if (name.length == 0) return @"YouTube Video";
     NSMutableCharacterSet *invalid = [NSMutableCharacterSet characterSetWithCharactersInString:@"/\\?%*|\"<>:"];
@@ -2294,6 +2308,12 @@ static void YouModPresentMenu(NSString *title, NSArray <YouModMenuItem *> *items
 - (void)startDirectVideoDownloadWithVideoFormat:(YouModMediaFormat *)videoFormat audioFormat:(YouModMediaFormat *)audioFormat fileName:(NSString *)fileName videoID:(NSString *)videoID presenter:(UIViewController *)presenter {
     NSURL *videoURL = [NSURL URLWithString:videoFormat.urlString];
     NSURL *audioURL = [NSURL URLWithString:audioFormat.urlString];
+    YouModRecordDownloadDiagnostic(
+        @"Selected video/audio download URLs",
+        [NSString stringWithFormat:@"video:\n%@\nvideoHeaders=%@\n\naudio:\n%@\naudioHeaders=%@",
+         YouModSafeURLDiagnostic(videoURL), videoFormat.httpHeaders.allKeys ?: @[],
+         YouModSafeURLDiagnostic(audioURL), audioFormat.httpHeaders.allKeys ?: @[]]
+    );
     if (!videoURL || !audioURL) {
         YouModSendToast(@"No stream URL found", presenter);
         return;
@@ -2627,6 +2647,15 @@ static void YouModPresentMenu(NSString *title, NSArray <YouModMenuItem *> *items
 }
 
 - (void)failWithError:(NSError *)error {
+    YouModRecordDownloadDiagnostic(
+        @"Download failed",
+        [NSString stringWithFormat:@"domain=%@\ncode=%ld\ndescription=%@\nreason=%@\nsuggestion=%@\nuserInfoKeys=%@",
+         error.domain ?: @"(nil)", (long)error.code,
+         error.localizedDescription ?: @"(nil)",
+         error.localizedFailureReason ?: @"(nil)",
+         error.localizedRecoverySuggestion ?: @"(nil)",
+         error.userInfo.allKeys ?: @[]]
+    );
     self.active = NO;
     [self.progressAlert dismissViewControllerAnimated:YES completion:nil];
     self.progressAlert = nil;
