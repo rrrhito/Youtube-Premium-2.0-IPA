@@ -3064,14 +3064,17 @@ static UIButton *YouModOwnedDownloadButton(YTPlayerViewController *player) {
     button = [UIButton buttonWithType:UIButtonTypeSystem];
     button.accessibilityIdentifier = @"youmod.owned.download.button";
     button.accessibilityLabel = @"Open YouMod download manager";
-    [button setTitle:@"↓ YouMod DL" forState:UIControlStateNormal];
-    [button setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    button.titleLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightSemibold];
+    UIImageSymbolConfiguration *symbolConfiguration =
+        [UIImageSymbolConfiguration configurationWithPointSize:20.0 weight:UIImageSymbolWeightSemibold];
+    UIImage *downloadIcon = [[UIImage systemImageNamed:@"arrow.down.circle.fill"]
+        imageByApplyingSymbolConfiguration:symbolConfiguration];
+    [button setImage:downloadIcon forState:UIControlStateNormal];
+    button.tintColor = UIColor.whiteColor;
     button.backgroundColor = [UIColor colorWithRed:0.36 green:0.18 blue:0.78 alpha:0.94];
-    button.layer.cornerRadius = 18.0;
+    button.layer.cornerRadius = 20.0;
     button.layer.shadowColor = UIColor.blackColor.CGColor;
     button.layer.shadowOpacity = 0.28;
-    button.layer.shadowRadius = 3.0;
+    button.layer.shadowRadius = 2.5;
     button.layer.shadowOffset = CGSizeMake(0.0, 1.0);
     [button addTarget:player
                action:@selector(youModOwnedDownloadButtonTapped:)
@@ -3092,8 +3095,8 @@ static void YouModLayoutOwnedDownloadButton(YTPlayerViewController *player) {
     if (!container || !button) return;
 
     UIEdgeInsets safeArea = container.safeAreaInsets;
-    CGFloat width = 112.0;
-    CGFloat height = 36.0;
+    CGFloat width = 40.0;
+    CGFloat height = 40.0;
     CGFloat x = MAX(12.0, CGRectGetWidth(container.bounds) - safeArea.right - width - 12.0);
     // Keep the pill on its own row below YouTube's top-right CC/overflow
     // cluster. The previous safeArea.top + 12 placement covered those native
