@@ -1698,8 +1698,10 @@ static NSArray *YouModAdaptiveFormatObjectsForPlayer(YTPlayerViewController *pla
     id streamingData = YouModObjectFromSelector(activeVideo, @selector(streamingData));
     NSArray *activeAdaptiveStreams = YouModObjectFromSelector(streamingData, @selector(adaptiveStreams));
     NSArray *selectableVideoFormats = YouModObjectFromSelector(activeVideo, @selector(selectableVideoFormats));
+    NSArray *selectableAudioFormats = YouModObjectFromSelector(activeVideo, @selector(selectableAudioFormats));
     appendFormats(activeAdaptiveStreams);
     appendFormats(selectableVideoFormats);
+    appendFormats(selectableAudioFormats);
 
     NSMutableArray<NSString *> *responseDetails = [NSMutableArray array];
 
@@ -1719,12 +1721,13 @@ static NSArray *YouModAdaptiveFormatObjectsForPlayer(YTPlayerViewController *pla
     YouModRecordDownloadDiagnostic(
         @"Available media format sources",
         [NSString stringWithFormat:
-            @"player=%@\nactiveVideo=%@\nstreamingData=%@\nadaptiveStreams=%lu\nselectableVideoFormats=%lu\nresponses=%@\nuniqueCandidateStreams=%lu",
+            @"player=%@\nactiveVideo=%@\nstreamingData=%@\nadaptiveStreams=%lu\nselectableVideoFormats=%lu\nselectableAudioFormats=%lu\nresponses=%@\nuniqueCandidateStreams=%lu",
             NSStringFromClass([player class]),
             NSStringFromClass([activeVideo class]),
             NSStringFromClass([streamingData class]),
             (unsigned long)([activeAdaptiveStreams isKindOfClass:NSArray.class] ? activeAdaptiveStreams.count : 0),
             (unsigned long)([selectableVideoFormats isKindOfClass:NSArray.class] ? selectableVideoFormats.count : 0),
+            (unsigned long)([selectableAudioFormats isKindOfClass:NSArray.class] ? selectableAudioFormats.count : 0),
             responseDetails.count ? [responseDetails componentsJoinedByString:@"\n"] : @"(none)",
             (unsigned long)formats.count]
     );
