@@ -690,6 +690,38 @@ static NSURL *YouModDiagnosticLogURL(void) {
     return [YouModDownloadsDirectoryURL() URLByAppendingPathComponent:@"youmod-download-diagnostics.txt"];
 }
 
+// The ResponderEvent -send probe (installed below) hooks a class of object
+// YouTube uses throughout the app, not just for downloads -- scrolling and
+// starting playback dispatch plenty of unrelated ResponderEvent subclasses.
+// Recording must therefore stay cheap under high call volume: no synchronous
+// disk I/O and no per-call file open/close on whatever thread (often the
+// main thread) happens to be sending the event. A dedicated serial queue
+// with a file handle opened once handles the actual write off that thread.
+// (2026-07-30: the first fix only scoped the UIView-identifier hook, which
+// stopped the launch-time freeze, but left this hook doing synchronous I/O
+// on every -send, which froze/crashed the app during scroll and playback.)
+static dispatch_queue_t YouModDiagnosticQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("com.youmod.diagnostic-log", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+static NSFileHandle *YouModDiagnosticFileHandle(void) {
+    static NSFileHandle *handle;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSURL *logURL = YouModDiagnosticLogURL();
+        if (![NSFileManager.defaultManager fileExistsAtPath:logURL.path])
+            [NSFileManager.defaultManager createFileAtPath:logURL.path contents:nil attributes:nil];
+        handle = [NSFileHandle fileHandleForWritingAtPath:logURL.path];
+        [handle seekToEndOfFile];
+    });
+    return handle;
+}
+
 static void YouModRecordDownloadDiagnostic(NSString *context, NSString *details) {
     if (context.length == 0 && details.length == 0) return;
 
@@ -704,19 +736,14 @@ static void YouModRecordDownloadDiagnostic(NSString *context, NSString *details)
     NSString *entry = [NSString stringWithFormat:@"[%@]\n%@\n%@\n\n", timestamp ?: @"", context ?: @"", details ?: @""];
     YouModLastDownloadDiagnostic = entry;
 
-    NSURL *logURL = YouModDiagnosticLogURL();
-    NSData *data = [entry dataUsingEncoding:NSUTF8StringEncoding];
-    if (![NSFileManager.defaultManager fileExistsAtPath:logURL.path])
-        [NSFileManager.defaultManager createFileAtPath:logURL.path contents:nil attributes:nil];
-
-    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:logURL.path];
-    if (!handle) return;
-    @try {
-        [handle seekToEndOfFile];
-        [handle writeData:data];
-        [handle closeFile];
-    } @catch (__unused NSException *exception) {
-    }
+    dispatch_async(YouModDiagnosticQueue(), ^{
+        NSFileHandle *handle = YouModDiagnosticFileHandle();
+        if (!handle) return;
+        @try {
+            [handle writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
+        } @catch (__unused NSException *exception) {
+        }
+    });
 }
 
 static NSString *YouModDownloadDiagnosticText(void) {
