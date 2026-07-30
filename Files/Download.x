@@ -56,6 +56,10 @@ extern void MSHookMessageEx(Class class, SEL selector, IMP replacement, IMP *res
 - (void)send;
 @end
 
+@interface YTISlimMetadataButtonSupportedRenderers : NSObject
+- (BOOL)slimButton_isOfflineButton;
+@end
+
 static const void *YouModOfflineUpsellKey = &YouModOfflineUpsellKey;
 
 static id YouModMarkOfflineUpsell(id event) {
@@ -2372,20 +2376,6 @@ static void YouModShowDownloadManager(YTPlayerViewController *player, UIViewCont
     YouModPresentMenu(@"Download manager", items, presenter, sender);
 }
 
-void YouModConfigureDownloadButton(_ASDisplayView *view) {
-    if (![view.accessibilityIdentifier isEqualToString:@"id.ui.add_to.offline.button"]) return;
-    if (!IS_ENABLED(DownloadManager) || IS_ENABLED(HideDownloadButton)) return;
-    if (objc_getAssociatedObject(view, @selector(YouModDownloadButtonTapped:))) return;
-
-    view.userInteractionEnabled = YES;
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:view action:@selector(YouModDownloadButtonTapped:)];
-    tap.cancelsTouchesInView = YES;
-    tap.delaysTouchesBegan = YES;
-    tap.delaysTouchesEnded = YES;
-    [view addGestureRecognizer:tap];
-    objc_setAssociatedObject(view, @selector(YouModDownloadButtonTapped:), @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
 // Scoped to identifiers that plausibly relate to the download/offline/upsell
 // flow under investigation. The first implementation logged every
 // accessibility identifier set anywhere in the app (there are hundreds during
@@ -2418,30 +2408,6 @@ static BOOL YouModIdentifierLooksDownloadRelated(NSString *identifier) {
              NSStringFromClass(self.class), accessibilityIdentifier]
         );
     }
-    YouModConfigureDownloadButton((_ASDisplayView *)self);
-}
-
-%end
-
-%hook _ASDisplayView
-
-%new
-- (void)YouModDownloadButtonTapped:(UITapGestureRecognizer *)sender {
-    YouModRecordDownloadDiagnostic(
-        @"YouModDownloadButtonTapped called",
-        [NSString stringWithFormat:@"sender=%@\ngestureState=%ld",
-         sender, (long)sender.state]
-    );
-    if (sender.state != UIGestureRecognizerStateEnded) {
-        YouModRecordDownloadDiagnostic(
-            @"YouModDownloadButtonTapped returned early",
-            [NSString stringWithFormat:@"gesture state is not ended (%ld)", (long)sender.state]
-        );
-        return;
-    }
-    UIViewController *presenter = YouModPresenterForSender(self, YouModCurrentPlayerViewController);
-    YTPlayerViewController *player = YouModPlayerFromViewController(presenter);
-    YouModShowDownloadManager(player, presenter, self);
 }
 
 %end
@@ -2588,6 +2554,26 @@ static BOOL YouModTakeOverDownloadEvent(UIView *sender) {
     YouModShowDownloadManager(player, presenter, sender);
     return YES;
 }
+
+// YouTube 21.28.3's slim action bar does not attach its tap recognizer to the
+// YTTransferButton. YTSlimVideoDetailsActionView owns the recognizer and calls
+// this delegate entry point with its supported renderer and visible button.
+// Intercept the offline branch before YouTube turns the renderer's command into
+// a Premium upsell.
+%hook YTSlimVideoScrollableActionBarCellController
+
+- (void)didTapButton:(YTISlimMetadataButtonSupportedRenderers *)button
+            fromRect:(CGRect)rect
+              inView:(UIView *)view {
+    if ([button respondsToSelector:@selector(slimButton_isOfflineButton)] &&
+        [button slimButton_isOfflineButton] &&
+        YouModTakeOverDownloadEvent(view)) {
+        return;
+    }
+    %orig;
+}
+
+%end
 
 %hook YTOfflineButtonPressedResponderEvent
 
