@@ -2,6 +2,7 @@
 #import "Headers.h"
 #import <AVFoundation/AVFoundation.h>
 #import <Photos/Photos.h>
+#import <JavaScriptCore/JavaScriptCore.h>
 #import <math.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -1303,6 +1304,329 @@ static NSArray *YouModPlayerResponsesForPlayer(YTPlayerViewController *player) {
     return responses.copy;
 }
 
+static NSMutableDictionary<NSString *, NSString *> *YouModResolvedCipherURLs;
+static NSString *YouModCipherResolutionVideoID;
+static BOOL YouModCipherResolutionInProgress;
+static BOOL YouModCipherResolutionAttempted;
+static NSMutableArray *YouModCipherResolutionCompletions;
+static NSArray *YouModAdaptiveFormatObjectsForPlayer(YTPlayerViewController *player);
+
+static NSString *YouModQueryValue(NSString *query, NSString *name) {
+    if (query.length == 0 || name.length == 0) return nil;
+    NSURLComponents *components = [NSURLComponents componentsWithString:[@"https://youmod.invalid/?" stringByAppendingString:query]];
+    for (NSURLQueryItem *item in components.queryItems) {
+        if ([item.name isEqualToString:name]) return item.value;
+    }
+    return nil;
+}
+
+static NSString *YouModNormalizedPlayerJSURL(NSString *value) {
+    if (value.length == 0) return nil;
+    value = [value stringByReplacingOccurrencesOfString:@"\\/" withString:@"/"];
+    if ([value hasPrefix:@"//"]) return [@"https:" stringByAppendingString:value];
+    if ([value hasPrefix:@"/"]) return [@"https://www.youtube.com" stringByAppendingString:value];
+    if ([value hasPrefix:@"http://"] || [value hasPrefix:@"https://"]) return value;
+    return nil;
+}
+
+static NSString *YouModFirstRegexCapture(NSString *text, NSArray<NSString *> *patterns) {
+    if (text.length == 0) return nil;
+    for (NSString *pattern in patterns) {
+        NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+        NSTextCheckingResult *match = [regex firstMatchInString:text options:0 range:NSMakeRange(0, text.length)];
+        if (match.numberOfRanges > 1 && [match rangeAtIndex:1].location != NSNotFound)
+            return [text substringWithRange:[match rangeAtIndex:1]];
+    }
+    return nil;
+}
+
+static NSRange YouModBalancedRange(NSString *text, NSUInteger openingLocation, unichar opening, unichar closing) {
+    if (openingLocation >= text.length || [text characterAtIndex:openingLocation] != opening) return NSMakeRange(NSNotFound, 0);
+    NSUInteger depth = 0;
+    BOOL inString = NO;
+    unichar quote = 0;
+    BOOL escaped = NO;
+    for (NSUInteger index = openingLocation; index < text.length; index++) {
+        unichar character = [text characterAtIndex:index];
+        if (inString) {
+            if (escaped) {
+                escaped = NO;
+            } else if (character == '\\') {
+                escaped = YES;
+            } else if (character == quote) {
+                inString = NO;
+            }
+            continue;
+        }
+        if (character == '"' || character == '\'' || character == '`') {
+            inString = YES;
+            quote = character;
+        } else if (character == opening) {
+            depth++;
+        } else if (character == closing) {
+            if (--depth == 0) return NSMakeRange(openingLocation, index - openingLocation + 1);
+        }
+    }
+    return NSMakeRange(NSNotFound, 0);
+}
+
+static NSString *YouModFunctionSource(NSString *javascript, NSString *name) {
+    if (javascript.length == 0 || name.length == 0) return nil;
+    NSString *escapedName = [NSRegularExpression escapedPatternForString:name];
+    NSArray<NSString *> *patterns = @[
+        [NSString stringWithFormat:@"(?:var\\s+)?%@\\s*=\\s*function\\s*\\([^)]*\\)\\s*\\{", escapedName],
+        [NSString stringWithFormat:@"function\\s+%@\\s*\\([^)]*\\)\\s*\\{", escapedName],
+    ];
+    for (NSString *pattern in patterns) {
+        NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+        NSTextCheckingResult *match = [regex firstMatchInString:javascript options:0 range:NSMakeRange(0, javascript.length)];
+        if (!match) continue;
+        NSRange braceSearch = [javascript rangeOfString:@"{" options:0 range:match.range];
+        NSRange bodyRange = YouModBalancedRange(javascript, braceSearch.location, '{', '}');
+        if (bodyRange.location == NSNotFound) continue;
+        NSRange sourceRange = NSMakeRange(match.range.location, NSMaxRange(bodyRange) - match.range.location);
+        NSString *source = [javascript substringWithRange:sourceRange];
+        if ([source hasPrefix:@"function"]) {
+            source = [NSString stringWithFormat:@"var %@=%@", name, source];
+        }
+        return [source stringByAppendingString:@";"];
+    }
+    return nil;
+}
+
+static NSString *YouModObjectLiteralSource(NSString *javascript, NSString *name) {
+    NSString *escapedName = [NSRegularExpression escapedPatternForString:name];
+    NSString *pattern = [NSString stringWithFormat:@"(?:var\\s+)?%@\\s*=\\s*\\{", escapedName];
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+    NSTextCheckingResult *match = [regex firstMatchInString:javascript options:0 range:NSMakeRange(0, javascript.length)];
+    if (!match) return nil;
+    NSRange braceSearch = [javascript rangeOfString:@"{" options:0 range:match.range];
+    NSRange objectRange = YouModBalancedRange(javascript, braceSearch.location, '{', '}');
+    if (objectRange.location == NSNotFound) return nil;
+    return [[javascript substringWithRange:NSMakeRange(match.range.location, NSMaxRange(objectRange) - match.range.location)] stringByAppendingString:@";"];
+}
+
+static NSString *YouModExecutableTransformSource(NSString *javascript, NSString *functionName) {
+    NSString *functionSource = YouModFunctionSource(javascript, functionName);
+    if (functionSource.length == 0) return nil;
+    NSMutableString *source = [NSMutableString string];
+    NSRegularExpression *dependencyRegex = [NSRegularExpression regularExpressionWithPattern:@"\\b([A-Za-z_$][A-Za-z0-9_$]*)\\.[A-Za-z_$][A-Za-z0-9_$]*\\(" options:0 error:nil];
+    NSArray<NSTextCheckingResult *> *matches = [dependencyRegex matchesInString:functionSource options:0 range:NSMakeRange(0, functionSource.length)];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    for (NSTextCheckingResult *match in matches) {
+        NSString *dependency = [functionSource substringWithRange:[match rangeAtIndex:1]];
+        if ([seen containsObject:dependency] || [@[@"Math", @"String", @"Array", @"Object"] containsObject:dependency]) continue;
+        [seen addObject:dependency];
+        NSString *objectSource = YouModObjectLiteralSource(javascript, dependency);
+        if (objectSource.length) [source appendString:objectSource];
+    }
+    [source appendString:functionSource];
+    return source;
+}
+
+static NSDictionary<NSString *, NSString *> *YouModExtractPlayerTransforms(NSString *javascript) {
+    NSString *signatureName = YouModFirstRegexCapture(javascript, @[
+        @"\\b[A-Za-z0-9_$]+&&\\([A-Za-z0-9_$]+=([A-Za-z0-9_$]{2,})\\(decodeURIComponent\\(",
+        @"\\.sig\\|\\|([A-Za-z0-9_$]+)\\(",
+        @"[\"']signature[\"']\\s*,\\s*([A-Za-z0-9_$]+)\\(",
+        @"([A-Za-z0-9_$]+)\\s*=\\s*function\\([^)]*\\)\\s*\\{[^{}]{0,120}\\.split\\(\\s*[\"'][\"']\\s*\\)",
+    ]);
+    NSString *nName = YouModFirstRegexCapture(javascript, @[
+        @"\\.get\\([\"']n[\"']\\)\\)\\s*&&\\s*\\([A-Za-z0-9_$]+\\s*=\\s*([A-Za-z0-9_$]+)\\(",
+        @"[A-Za-z0-9_$]+\\.n\\|\\|null\\)\\s*&&\\s*\\([A-Za-z0-9_$]+\\s*=\\s*([A-Za-z0-9_$]+)\\(",
+        @"[\"']n[\"']\\s*,\\s*([A-Za-z0-9_$]+)\\(",
+    ]);
+    NSString *signatureSource = YouModExecutableTransformSource(javascript, signatureName);
+    NSString *nSource = YouModExecutableTransformSource(javascript, nName);
+    YouModRecordDownloadDiagnostic(
+        @"Player JS transform extraction",
+        [NSString stringWithFormat:@"javascriptLength=%lu\nsignatureName=%@\nsignatureSourceLength=%lu\nnName=%@\nnSourceLength=%lu",
+         (unsigned long)javascript.length,
+         signatureName ?: @"(not found)",
+         (unsigned long)signatureSource.length,
+         nName ?: @"(not found)",
+         (unsigned long)nSource.length]
+    );
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    if (signatureName.length && signatureSource.length) {
+        result[@"signatureName"] = signatureName;
+        result[@"signatureSource"] = signatureSource;
+    }
+    if (nName.length && nSource.length) {
+        result[@"nName"] = nName;
+        result[@"nSource"] = nSource;
+    }
+    return result.copy;
+}
+
+static NSString *YouModExecuteTransform(NSString *source, NSString *name, NSString *input, NSString *kind) {
+    if (source.length == 0 || name.length == 0 || input.length == 0) return nil;
+    JSContext *context = [JSContext new];
+    __block NSString *exceptionText = nil;
+    context.exceptionHandler = ^(__unused JSContext *ctx, JSValue *exception) {
+        exceptionText = exception.toString;
+    };
+    [context evaluateScript:source];
+    JSValue *function = context[name];
+    JSValue *result = function.isObject ? [function callWithArguments:@[input]] : nil;
+    NSString *output = result.isString ? result.toString : nil;
+    YouModRecordDownloadDiagnostic(
+        @"Player JS transform execution",
+        [NSString stringWithFormat:@"kind=%@\nfunction=%@\ninputLength=%lu\noutputLength=%lu\nchanged=%@\nexception=%@",
+         kind, name, (unsigned long)input.length, (unsigned long)output.length,
+         output.length && ![output isEqualToString:input] ? @"YES" : @"NO",
+         exceptionText ?: @"(none)"]
+    );
+    return output.length ? output : nil;
+}
+
+static NSString *YouModResolvedURLFromCipher(NSString *cipher, NSDictionary<NSString *, NSString *> *transforms) {
+    NSString *baseURL = YouModQueryValue(cipher, @"url");
+    NSString *encryptedSignature = YouModQueryValue(cipher, @"s");
+    NSString *signatureParameter = YouModQueryValue(cipher, @"sp") ?: @"signature";
+    if (baseURL.length == 0 || encryptedSignature.length == 0) return nil;
+
+    NSString *signature = YouModExecuteTransform(transforms[@"signatureSource"], transforms[@"signatureName"], encryptedSignature, @"signature");
+    if (signature.length == 0) return nil;
+    NSURLComponents *components = [NSURLComponents componentsWithString:baseURL];
+    NSMutableArray<NSURLQueryItem *> *items = [components.queryItems mutableCopy] ?: [NSMutableArray array];
+    [items addObject:[NSURLQueryItem queryItemWithName:signatureParameter value:signature]];
+    components.queryItems = items;
+
+    NSString *nValue = nil;
+    for (NSURLQueryItem *item in components.queryItems) {
+        if ([item.name isEqualToString:@"n"]) {
+            nValue = item.value;
+            break;
+        }
+    }
+    if (nValue.length) {
+        NSString *resolvedN = YouModExecuteTransform(transforms[@"nSource"], transforms[@"nName"], nValue, @"n");
+        if (resolvedN.length == 0) return nil;
+        NSMutableArray *updatedItems = [NSMutableArray array];
+        for (NSURLQueryItem *item in components.queryItems)
+            [updatedItems addObject:[item.name isEqualToString:@"n"] ? [NSURLQueryItem queryItemWithName:@"n" value:resolvedN] : item];
+        components.queryItems = updatedItems;
+    }
+    NSString *resolvedURL = components.URL.absoluteString;
+    YouModRecordDownloadDiagnostic(
+        @"signatureCipher final URL",
+        [NSString stringWithFormat:@"baseURLValid=%@\nhadN=%@\nfinalURLValid=%@\nchanged=%@",
+         [NSURL URLWithString:baseURL] ? @"YES" : @"NO",
+         nValue.length ? @"YES" : @"NO",
+         [NSURL URLWithString:resolvedURL] ? @"YES" : @"NO",
+         resolvedURL.length && ![resolvedURL isEqualToString:baseURL] ? @"YES" : @"NO"]
+    );
+    return resolvedURL;
+}
+
+static NSString *YouModPlayerJSURLFromResponses(YTPlayerViewController *player) {
+    NSArray<NSString *> *selectors = @[@"playerJSURL", @"playerJsUrl", @"jsUrl", @"jsURL", @"playerURL", @"playerUrl"];
+    for (id response in YouModPlayerResponsesForPlayer(player)) {
+        NSArray *objects = @[response, YouModObjectFromSelector(response, @selector(playerData)) ?: NSNull.null];
+        for (id object in objects) {
+            if (object == NSNull.null) continue;
+            for (NSString *selectorName in selectors) {
+                NSString *value = YouModStringFromSelector(object, NSSelectorFromString(selectorName));
+                NSString *normalized = YouModNormalizedPlayerJSURL(value);
+                if (normalized.length) {
+                    YouModRecordDownloadDiagnostic(@"Player JS URL acquisition", [NSString stringWithFormat:@"path=in-app\nclass=%@\nselector=%@\nurl=%@", NSStringFromClass([object class]), selectorName, normalized]);
+                    return normalized;
+                }
+            }
+        }
+    }
+    YouModRecordDownloadDiagnostic(@"Player JS URL acquisition", @"path=in-app\nresult=not found; falling back to embed page");
+    return nil;
+}
+
+static void YouModFinishCipherResolution(void) {
+    YouModCipherResolutionInProgress = NO;
+    NSArray *completions = YouModCipherResolutionCompletions.copy;
+    [YouModCipherResolutionCompletions removeAllObjects];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (void (^completion)(void) in completions) completion();
+    });
+}
+
+static void YouModResolveCipherStreamsWithPlayerJS(YTPlayerViewController *player, NSString *playerJSURL) {
+    NSURL *url = [NSURL URLWithString:playerJSURL];
+    if (!url) {
+        YouModRecordDownloadDiagnostic(@"Player JS fetch", @"invalid player JS URL");
+        YouModFinishCipherResolution();
+        return;
+    }
+    [[[NSURLSession sharedSession] dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSString *javascript = data.length ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+        YouModRecordDownloadDiagnostic(
+            @"Player JS fetch",
+            [NSString stringWithFormat:@"url=%@\nhttpStatus=%ld\nbytes=%lu\nerror=%@",
+             playerJSURL, (long)[(NSHTTPURLResponse *)response statusCode], (unsigned long)data.length, error ?: @"(none)"]
+        );
+        if (javascript.length == 0) {
+            YouModFinishCipherResolution();
+            return;
+        }
+        NSDictionary *transforms = YouModExtractPlayerTransforms(javascript);
+        NSUInteger attempted = 0;
+        NSUInteger resolved = 0;
+        for (id stream in YouModAdaptiveFormatObjectsForPlayer(player)) {
+            NSString *cipher = YouModStringFromSelector(stream, @selector(signatureCipher));
+            if (cipher.length == 0) continue;
+            attempted++;
+            NSString *resolvedURL = YouModResolvedURLFromCipher(cipher, transforms);
+            if (resolvedURL.length) {
+                YouModResolvedCipherURLs[cipher] = resolvedURL;
+                resolved++;
+            }
+        }
+        YouModRecordDownloadDiagnostic(@"signatureCipher resolution summary", [NSString stringWithFormat:@"attempted=%lu\nresolved=%lu", (unsigned long)attempted, (unsigned long)resolved]);
+        YouModFinishCipherResolution();
+    }] resume];
+}
+
+static void YouModBeginCipherResolution(YTPlayerViewController *player, void (^completion)(void)) {
+    NSString *videoID = YouModVideoIDForPlayer(player) ?: @"";
+    if (![YouModCipherResolutionVideoID isEqualToString:videoID]) {
+        YouModCipherResolutionVideoID = videoID;
+        YouModCipherResolutionAttempted = NO;
+        YouModCipherResolutionInProgress = NO;
+        YouModResolvedCipherURLs = [NSMutableDictionary dictionary];
+        YouModCipherResolutionCompletions = [NSMutableArray array];
+    }
+    if (completion) [YouModCipherResolutionCompletions addObject:[completion copy]];
+    if (YouModCipherResolutionInProgress) return;
+    if (YouModCipherResolutionAttempted) {
+        YouModFinishCipherResolution();
+        return;
+    }
+    YouModCipherResolutionAttempted = YES;
+    YouModCipherResolutionInProgress = YES;
+
+    NSString *inAppURL = YouModPlayerJSURLFromResponses(player);
+    if (inAppURL.length) {
+        YouModResolveCipherStreamsWithPlayerJS(player, inAppURL);
+        return;
+    }
+
+    NSString *embedURLString = [NSString stringWithFormat:@"https://www.youtube.com/embed/%@?hl=en", videoID];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:embedURLString]];
+    [request setValue:YouModNativeUserAgent() forHTTPHeaderField:@"User-Agent"];
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSString *html = data.length ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+        NSString *path = YouModFirstRegexCapture(html, @[@"[\"']jsUrl[\"']\\s*:\\s*[\"']([^\"']+)[\"']", @"/s/player/[A-Za-z0-9_-]+/[^\"']+\\.js"]);
+        NSString *playerJSURL = YouModNormalizedPlayerJSURL(path);
+        YouModRecordDownloadDiagnostic(
+            @"Player JS URL acquisition",
+            [NSString stringWithFormat:@"path=embed\nhttpStatus=%ld\nbytes=%lu\nurl=%@\nerror=%@",
+             (long)[(NSHTTPURLResponse *)response statusCode], (unsigned long)data.length,
+             playerJSURL ?: @"(not found)", error ?: @"(none)"]
+        );
+        if (playerJSURL.length) YouModResolveCipherStreamsWithPlayerJS(player, playerJSURL);
+        else YouModFinishCipherResolution();
+    }] resume];
+}
+
 // Where is this going to?
 static NSArray *YouModCaptionTracksForPlayer(YTPlayerViewController *player) {
     for (id response in YouModPlayerResponsesForPlayer(player)) {
@@ -1395,6 +1719,11 @@ static YouModMediaFormat *YouModMediaFormatFromStream(id stream, BOOL video) {
     if (url.length == 0) url = YouModStringFromSelector(formatStream, @selector(URL));
     if (url.length == 0) url = YouModStringFromSelector(stream, @selector(url));
     if (url.length == 0) url = YouModStringFromSelector(formatStream, @selector(url));
+    if (url.length == 0) {
+        NSString *cipher = YouModStringFromSelector(stream, @selector(signatureCipher));
+        if (cipher.length == 0) cipher = YouModStringFromSelector(formatStream, @selector(signatureCipher));
+        if (cipher.length) url = YouModResolvedCipherURLs[cipher];
+    }
     if (url.length == 0) {
         YouModRecordDownloadDiagnostic(
             @"Media format rejected: no URL",
@@ -2326,19 +2655,48 @@ static void YouModShowVideoQualitySheet(YTPlayerViewController *player, UIViewCo
     NSString *title = YouModTitleForPlayer(player);
     NSString *videoID = YouModVideoIDForPlayer(player);
 
-    if (videoFormats.count == 0 || !audioFormat) {
-        YouModSendToast(@"No video/audio streams found", presenter);
+    BOOL resolutionBelongsToVideo = [YouModCipherResolutionVideoID isEqualToString:videoID ?: @""];
+    if (!audioFormat && (!resolutionBelongsToVideo || !YouModCipherResolutionAttempted)) {
+        YouModSendToast(@"Resolving protected stream URLs…", presenter);
+        YouModBeginCipherResolution(player, ^{
+            YouModShowVideoQualitySheet(player, presenter, sender);
+        });
+        return;
+    }
+
+    if (videoFormats.count == 0) {
+        YouModSendToast(@"No video streams found", presenter);
         return;
     }
 
     NSMutableArray *items = [NSMutableArray array];
     for (YouModMediaFormat *format in videoFormats) {
+        NSInteger itag = YouModIntegerFromSelector(format.source, @selector(itag));
+        if (itag == 0) {
+            id formatStream = YouModObjectFromSelector(format.source, @selector(formatStream));
+            itag = YouModIntegerFromSelector(formatStream, @selector(itag));
+        }
+        BOOL progressiveFallback = !audioFormat && [@[@18, @22, @37, @38, @59, @78] containsObject:@(itag)];
+        if (!audioFormat && !progressiveFallback) continue;
         NSString *rowTitle = format.qualityLabel.length ? format.qualityLabel : @"Video";
         NSString *subtitle = YouModFormatSubtitle(format);
+        if (progressiveFallback)
+            subtitle = subtitle.length ? [subtitle stringByAppendingString:@" - progressive"] : @"Progressive video with audio";
         [items addObject:[YouModMenuItem itemWithTitle:rowTitle subtitle:subtitle icon:YouModIconImage(658) handler:^{
-            [[YouModDownloadCoordinator sharedCoordinator] startVideoDownloadWithVideoFormat:format audioFormat:audioFormat fileName:title videoID:videoID presenter:presenter];
+            if (audioFormat) {
+                [[YouModDownloadCoordinator sharedCoordinator] startVideoDownloadWithVideoFormat:format audioFormat:audioFormat fileName:title videoID:videoID presenter:presenter];
+            } else {
+                [[YouModDownloadCoordinator sharedCoordinator] startDirectSingleVideoDownloadWithFormat:format fileName:title videoID:videoID presenter:presenter];
+            }
         }]];
     }
+    if (items.count == 0) {
+        YouModRecordDownloadDiagnostic(@"Progressive video fallback", @"No plaintext progressive itag with embedded audio was available");
+        YouModSendToast(@"No usable video/audio streams found", presenter);
+        return;
+    }
+    if (!audioFormat)
+        YouModRecordDownloadDiagnostic(@"Progressive video fallback", [NSString stringWithFormat:@"signatureCipher resolution unavailable; presenting %lu plaintext progressive formats", (unsigned long)items.count]);
     YouModPresentMenu(@"Download video", items, presenter, sender);
 }
 
@@ -2349,11 +2707,15 @@ static void YouModShowAudioSourceSheet(YTPlayerViewController *player, YouModAud
     NSMutableArray *items = [NSMutableArray array];
 
     if (audioFormats.count == 0) {
-        if (items.count) {
-            YouModPresentMenu(@"Download audio", items, presenter, sender);
-            return;
+        BOOL resolutionBelongsToVideo = [YouModCipherResolutionVideoID isEqualToString:videoID ?: @""];
+        if (!resolutionBelongsToVideo || !YouModCipherResolutionAttempted) {
+            YouModSendToast(@"Resolving protected stream URLs…", presenter);
+            YouModBeginCipherResolution(player, ^{
+                YouModShowAudioSourceSheet(player, outputFormat, presenter, sender);
+            });
+        } else {
+            YouModSendToast(@"No resolved audio streams found", presenter);
         }
-        YouModSendToast(@"No audio streams found", presenter);
         return;
     }
 
@@ -2733,7 +3095,12 @@ static void YouModLayoutOwnedDownloadButton(YTPlayerViewController *player) {
     CGFloat width = 112.0;
     CGFloat height = 36.0;
     CGFloat x = MAX(12.0, CGRectGetWidth(container.bounds) - safeArea.right - width - 12.0);
-    CGFloat y = MAX(safeArea.top + 12.0, 12.0);
+    // Keep the pill on its own row below YouTube's top-right CC/overflow
+    // cluster. The previous safeArea.top + 12 placement covered those native
+    // controls in fullscreen.
+    CGFloat y = MAX(safeArea.top + 56.0, 56.0);
+    if (y + height > CGRectGetHeight(container.bounds) - safeArea.bottom - 12.0)
+        y = MAX(12.0, CGRectGetHeight(container.bounds) - safeArea.bottom - height - 12.0);
     button.frame = CGRectMake(x, y, width, height);
     [container bringSubviewToFront:button];
     BOOL controlsVisible = [objc_getAssociatedObject(player, @selector(youModControlsOverlayVisible)) boolValue];
