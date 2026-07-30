@@ -1248,6 +1248,7 @@ static NSString *YouModCipherResolutionVideoID;
 static BOOL YouModCipherResolutionInProgress;
 static BOOL YouModCipherResolutionAttempted;
 static NSMutableArray *YouModCipherResolutionCompletions;
+static NSArray *YouModFallbackPlayerFormats;
 static NSArray *YouModAdaptiveFormatObjectsForPlayer(YTPlayerViewController *player);
 static NSString *YouModCipherDiagnosticVideoID;
 static NSMutableSet<NSString *> *YouModLoggedRejectedStreamKeys;
@@ -1614,6 +1615,82 @@ static void YouModResolveCipherStreamsWithPlayerJS(YTPlayerViewController *playe
     }] resume];
 }
 
+static void YouModFetchFallbackPlayerFormats(YTPlayerViewController *player,
+                                             NSString *html,
+                                             NSString *playerJSURL) {
+    NSString *apiKey = YouModFirstRegexCapture(html, @[
+        @"[\"']INNERTUBE_API_KEY[\"']\\s*:\\s*[\"']([^\"']+)[\"']"
+    ]);
+    NSString *clientVersion = YouModFirstRegexCapture(html, @[
+        @"[\"']INNERTUBE_CLIENT_VERSION[\"']\\s*:\\s*[\"']([^\"']+)[\"']"
+    ]);
+    NSString *videoID = YouModVideoIDForPlayer(player);
+    if (apiKey.length == 0 || clientVersion.length == 0 || videoID.length == 0) {
+        YouModRecordDownloadDiagnostic(
+            @"Fallback player response",
+            [NSString stringWithFormat:@"result=configuration unavailable\napiKey=%@\nclientVersion=%@\nvideoID=%@",
+             apiKey.length ? @"found" : @"missing",
+             clientVersion ?: @"(missing)",
+             videoID ?: @"(missing)"]
+        );
+        YouModResolveCipherStreamsWithPlayerJS(player, playerJSURL);
+        return;
+    }
+
+    NSString *endpoint = [NSString stringWithFormat:
+        @"https://www.youtube.com/youtubei/v1/player?key=%@&prettyPrint=false",
+        apiKey];
+    NSDictionary *body = @{
+        @"context": @{@"client": @{
+            @"clientName": @"WEB_EMBEDDED_PLAYER",
+            @"clientVersion": clientVersion,
+            @"hl": @"en",
+            @"clientScreen": @"EMBED"
+        }},
+        @"videoId": videoID,
+        @"thirdParty": @{@"embedUrl": @"https://www.youtube.com/"}
+    };
+    NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+    NSMutableURLRequest *request =
+        [NSMutableURLRequest requestWithURL:[NSURL URLWithString:endpoint]];
+    request.HTTPMethod = @"POST";
+    request.HTTPBody = bodyData;
+    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [request setValue:@"https://www.youtube.com" forHTTPHeaderField:@"Origin"];
+    [request setValue:YouModNativeUserAgent() forHTTPHeaderField:@"User-Agent"];
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:request
+        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSDictionary *json = data.length
+            ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil]
+            : nil;
+        NSDictionary *streamingData = [json[@"streamingData"] isKindOfClass:NSDictionary.class]
+            ? json[@"streamingData"]
+            : nil;
+        NSMutableArray *formats = [NSMutableArray array];
+        NSArray *adaptive = streamingData[@"adaptiveFormats"];
+        NSArray *progressive = streamingData[@"formats"];
+        if ([adaptive isKindOfClass:NSArray.class]) [formats addObjectsFromArray:adaptive];
+        if ([progressive isKindOfClass:NSArray.class]) [formats addObjectsFromArray:progressive];
+        YouModFallbackPlayerFormats = formats.copy;
+        NSDictionary *playability = [json[@"playabilityStatus"] isKindOfClass:NSDictionary.class]
+            ? json[@"playabilityStatus"]
+            : nil;
+        YouModRecordDownloadDiagnostic(
+            @"Fallback player response",
+            [NSString stringWithFormat:
+                @"httpStatus=%ld\nbytes=%lu\nstatus=%@\nreason=%@\nadaptiveFormats=%lu\nprogressiveFormats=%lu",
+             (long)[(NSHTTPURLResponse *)response statusCode],
+             (unsigned long)data.length,
+             playability[@"status"] ?: @"(none)",
+             playability[@"reason"] ?: (error.localizedDescription ?: @"(none)"),
+             (unsigned long)([adaptive isKindOfClass:NSArray.class] ? adaptive.count : 0),
+             (unsigned long)([progressive isKindOfClass:NSArray.class] ? progressive.count : 0)]
+        );
+        YouModResolveCipherStreamsWithPlayerJS(player, playerJSURL);
+    }] resume];
+}
+
 static void YouModBeginCipherResolution(YTPlayerViewController *player, void (^completion)(void)) {
     NSString *videoID = YouModVideoIDForPlayer(player) ?: @"";
     if (![YouModCipherResolutionVideoID isEqualToString:videoID]) {
@@ -1622,6 +1699,7 @@ static void YouModBeginCipherResolution(YTPlayerViewController *player, void (^c
         YouModCipherResolutionInProgress = NO;
         YouModResolvedCipherURLs = [NSMutableDictionary dictionary];
         YouModCipherResolutionCompletions = [NSMutableArray array];
+        YouModFallbackPlayerFormats = nil;
     }
     YouModPrepareCipherDiagnosticScope(videoID);
     if (completion) [YouModCipherResolutionCompletions addObject:[completion copy]];
@@ -1657,7 +1735,7 @@ static void YouModBeginCipherResolution(YTPlayerViewController *player, void (^c
              (long)[(NSHTTPURLResponse *)response statusCode], (unsigned long)data.length,
              playerJSURL ?: @"(not found)", error ?: @"(none)"]
         );
-        if (playerJSURL.length) YouModResolveCipherStreamsWithPlayerJS(player, playerJSURL);
+        if (playerJSURL.length) YouModFetchFallbackPlayerFormats(player, html, playerJSURL);
         else YouModFinishCipherResolution();
     }] resume];
 }
@@ -1731,6 +1809,7 @@ static NSArray *YouModAdaptiveFormatObjectsForPlayer(YTPlayerViewController *pla
             NSStringFromClass([responseStreamingData class]),
             (unsigned long)([adaptiveFormats isKindOfClass:NSArray.class] ? adaptiveFormats.count : 0)]];
     }
+    appendFormats(YouModFallbackPlayerFormats);
 
     YouModRecordDownloadDiagnostic(
         @"Available media format sources",
