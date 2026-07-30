@@ -1625,7 +1625,17 @@ static void YouModFetchFallbackPlayerFormatsWithSTS(YTPlayerViewController *play
     NSString *clientVersion = YouModFirstRegexCapture(html, @[
         @"[\"']INNERTUBE_CLIENT_VERSION[\"']\\s*:\\s*[\"']([^\"']+)[\"']"
     ]);
-    NSString *videoID = YouModVideoIDForPlayer(player);
+    NSString *visitorData = YouModFirstRegexCapture(html, @[
+        @"[\"']VISITOR_DATA[\"']\\s*:\\s*[\"']([^\"']+)[\"']",
+        @"[\"']visitorData[\"']\\s*:\\s*[\"']([^\"']+)[\"']"
+    ]);
+    NSString *clientNameHeader = YouModFirstRegexCapture(html, @[
+        @"[\"']INNERTUBE_CONTEXT_CLIENT_NAME[\"']\\s*:\\s*(\\d+)"
+    ]);
+    // The player can lose activeVideo/contentVideoID while the download sheet is
+    // presented. Use the ID captured when resolution began instead of consulting
+    // the mutable player again from this asynchronous callback.
+    NSString *videoID = YouModCipherResolutionVideoID;
     if (apiKey.length == 0 || clientVersion.length == 0 || videoID.length == 0) {
         YouModRecordDownloadDiagnostic(
             @"Fallback player response",
@@ -1641,15 +1651,18 @@ static void YouModFetchFallbackPlayerFormatsWithSTS(YTPlayerViewController *play
     NSString *endpoint = [NSString stringWithFormat:
         @"https://www.youtube.com/youtubei/v1/player?key=%@&prettyPrint=false",
         apiKey];
+    NSMutableDictionary *client = [@{
+        // INNERTUBE_CLIENT_VERSION from the embed page is the WEB (2.x)
+        // version. Pairing it with WEB_EMBEDDED_PLAYER caused YouTube to return
+        // the misleading "This video is unavailable" response.
+        @"clientName": @"WEB",
+        @"clientVersion": clientVersion,
+        @"hl": @"en"
+    } mutableCopy];
+    if (visitorData.length) client[@"visitorData"] = visitorData;
     NSDictionary *body = @{
-        @"context": @{@"client": @{
-            @"clientName": @"WEB_EMBEDDED_PLAYER",
-            @"clientVersion": clientVersion,
-            @"hl": @"en",
-            @"clientScreen": @"EMBED"
-        }},
+        @"context": @{@"client": client},
         @"videoId": videoID,
-        @"thirdParty": @{@"embedUrl": @"https://www.youtube.com/"},
         @"playbackContext": @{@"contentPlaybackContext": @{
             @"html5Preference": @"HTML5_PREF_WANTS",
             @"signatureTimestamp": @(signatureTimestamp)
@@ -1664,6 +1677,12 @@ static void YouModFetchFallbackPlayerFormatsWithSTS(YTPlayerViewController *play
     request.HTTPBody = bodyData;
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [request setValue:@"https://www.youtube.com" forHTTPHeaderField:@"Origin"];
+    [request setValue:@"https://www.youtube.com/" forHTTPHeaderField:@"Referer"];
+    [request setValue:clientVersion forHTTPHeaderField:@"X-Youtube-Client-Version"];
+    if (clientNameHeader.length)
+        [request setValue:clientNameHeader forHTTPHeaderField:@"X-Youtube-Client-Name"];
+    if (visitorData.length)
+        [request setValue:visitorData forHTTPHeaderField:@"X-Goog-Visitor-Id"];
     [request setValue:YouModNativeUserAgent() forHTTPHeaderField:@"User-Agent"];
 
     [[[NSURLSession sharedSession] dataTaskWithRequest:request
@@ -1686,7 +1705,10 @@ static void YouModFetchFallbackPlayerFormatsWithSTS(YTPlayerViewController *play
         YouModRecordDownloadDiagnostic(
             @"Fallback player response",
             [NSString stringWithFormat:
-                @"signatureTimestamp=%ld\nhttpStatus=%ld\nbytes=%lu\nstatus=%@\nreason=%@\nadaptiveFormats=%lu\nprogressiveFormats=%lu",
+                @"videoID=%@\nclientName=WEB\nclientVersion=%@\nvisitorData=%@\nsignatureTimestamp=%ld\nhttpStatus=%ld\nbytes=%lu\nstatus=%@\nreason=%@\nadaptiveFormats=%lu\nprogressiveFormats=%lu",
+             videoID,
+             clientVersion,
+             visitorData.length ? @"present" : @"missing",
              (long)signatureTimestamp,
              (long)[(NSHTTPURLResponse *)response statusCode],
              (unsigned long)data.length,
