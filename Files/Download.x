@@ -492,11 +492,14 @@ void YouModDownloadSetCurrentPlayer(YTPlayerViewController *player) {
 static NSString *YouModStringFromSelector(id object, SEL selector) {
     if (!object) return nil;
     id value = nil;
-    if ([object respondsToSelector:selector]) {
+    NSString *key = NSStringFromSelector(selector);
+    if ([object isKindOfClass:NSDictionary.class]) {
+        value = [(NSDictionary *)object objectForKey:key];
+    } else if ([object respondsToSelector:selector]) {
         value = ((id (*)(id, SEL))objc_msgSend)(object, selector);
     } else {
         @try {
-            value = [object valueForKey:NSStringFromSelector(selector)];
+            value = [object valueForKey:key];
         } @catch (__unused NSException *exception) {
             value = nil;
         }
@@ -509,6 +512,8 @@ static NSString *YouModStringFromSelector(id object, SEL selector) {
 
 static id YouModObjectFromSelector(id object, SEL selector) {
     if (!object) return nil;
+    if ([object isKindOfClass:NSDictionary.class])
+        return [(NSDictionary *)object objectForKey:NSStringFromSelector(selector)];
     if ([object respondsToSelector:selector]) {
         return ((id (*)(id, SEL))objc_msgSend)(object, selector);
     }
@@ -521,6 +526,11 @@ static id YouModObjectFromSelector(id object, SEL selector) {
 
 static unsigned long long YouModUnsignedLongLongFromSelector(id object, SEL selector) {
     if (!object) return 0;
+    if ([object isKindOfClass:NSDictionary.class]) {
+        id value = [(NSDictionary *)object objectForKey:NSStringFromSelector(selector)];
+        return [value respondsToSelector:@selector(unsignedLongLongValue)]
+            ? [value unsignedLongLongValue] : 0;
+    }
     if ([object respondsToSelector:selector]) {
         return ((unsigned long long (*)(id, SEL))objc_msgSend)(object, selector);
     }
@@ -535,6 +545,10 @@ static unsigned long long YouModUnsignedLongLongFromSelector(id object, SEL sele
 
 static BOOL YouModBoolFromSelector(id object, SEL selector) {
     if (!object) return NO;
+    if ([object isKindOfClass:NSDictionary.class]) {
+        id value = [(NSDictionary *)object objectForKey:NSStringFromSelector(selector)];
+        return [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;
+    }
     if ([object respondsToSelector:selector]) {
         return ((BOOL (*)(id, SEL))objc_msgSend)(object, selector);
     }
@@ -549,6 +563,10 @@ static BOOL YouModBoolFromSelector(id object, SEL selector) {
 
 static NSInteger YouModIntegerFromSelector(id object, SEL selector) {
     if (!object) return 0;
+    if ([object isKindOfClass:NSDictionary.class]) {
+        id value = [(NSDictionary *)object objectForKey:NSStringFromSelector(selector)];
+        return [value respondsToSelector:@selector(integerValue)] ? [value integerValue] : 0;
+    }
     if ([object respondsToSelector:selector]) {
         return ((NSInteger (*)(id, SEL))objc_msgSend)(object, selector);
     }
@@ -1699,13 +1717,16 @@ static void YouModFetchFallbackPlayerFormatsWithSTS(YTPlayerViewController *play
         if ([adaptive isKindOfClass:NSArray.class]) [formats addObjectsFromArray:adaptive];
         if ([progressive isKindOfClass:NSArray.class]) [formats addObjectsFromArray:progressive];
         YouModFallbackPlayerFormats = formats.copy;
+        NSDictionary *sampleFormat = [formats.firstObject isKindOfClass:NSDictionary.class]
+            ? formats.firstObject
+            : nil;
         NSDictionary *playability = [json[@"playabilityStatus"] isKindOfClass:NSDictionary.class]
             ? json[@"playabilityStatus"]
             : nil;
         YouModRecordDownloadDiagnostic(
             @"Fallback player response",
             [NSString stringWithFormat:
-                @"videoID=%@\nclientName=WEB\nclientVersion=%@\nvisitorData=%@\nsignatureTimestamp=%ld\nhttpStatus=%ld\nbytes=%lu\nstatus=%@\nreason=%@\nadaptiveFormats=%lu\nprogressiveFormats=%lu",
+                @"videoID=%@\nclientName=WEB\nclientVersion=%@\nvisitorData=%@\nsignatureTimestamp=%ld\nhttpStatus=%ld\nbytes=%lu\nstatus=%@\nreason=%@\nadaptiveFormats=%lu\nprogressiveFormats=%lu\nsampleFormatKeys=%@",
              videoID,
              clientVersion,
              visitorData.length ? @"present" : @"missing",
@@ -1715,7 +1736,8 @@ static void YouModFetchFallbackPlayerFormatsWithSTS(YTPlayerViewController *play
              playability[@"status"] ?: @"(none)",
              playability[@"reason"] ?: (error.localizedDescription ?: @"(none)"),
              (unsigned long)([adaptive isKindOfClass:NSArray.class] ? adaptive.count : 0),
-             (unsigned long)([progressive isKindOfClass:NSArray.class] ? progressive.count : 0)]
+             (unsigned long)([progressive isKindOfClass:NSArray.class] ? progressive.count : 0),
+             sampleFormat ? [[sampleFormat.allKeys sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","] : @"(none)"]
         );
         YouModResolveCipherStreamsWithPlayerJS(player, playerJSURL);
     }] resume];
